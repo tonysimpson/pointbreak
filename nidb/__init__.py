@@ -4,19 +4,119 @@ import signal
 import pyptrace
 import distorm3
 from collections import namedtuple
-
+from elftools.elf.elffile import ELFFile
+from elftools.dwarf.descriptions import describe_form_class
 
 
 class DebuggingError(Exception):
     pass
 
 
+class UnknownMapping(Exception):
+    pass
+
+
 _mapping = namedtuple("mapping", "lower upper r w x s p offset device inode pathname".split())
+_function = namedtuple("function", "name lower_address upper_address".split())
+_line = namedtuple("line", "filename line_number address".split())
+
+
+def _mapping_file_address_bounds(elf, mapping):
+    lower, upper = mapping.offset, mapping.offset + (mapping.upper - mapping.lower)
+    for seg in elf.iter_segments():
+        if seg.header.p_type == "PT_LOAD":
+            if lower <= seg.header.p_offset <= upper:
+                return (lower, upper), lower - seg.header.p_vaddr
+    raise UnknownMapping()
+
+
+def _extract_symbols(mapping):
+    elf = ELFFile(open(mapping.pathname, 'rb'))
+    (lower, upper), offset = _mapping_file_address_bounds(elf, mapping)
+    for symbol in elf.get_section_by_name('.symtab').iter_symbols():
+        if symbol.entry.st_info.type == 'STT_FUNC':
+            if lower <= symbol.entry.st_value <= upper:
+                name = symbol.name
+                low_pc = symbol.entry.st_value
+                high_pc = symbol.entry.st_value
+                yield _function(name, low_pc, high_pc)
+
+
+
+
+class _ElfDwarfSymbolExtractor:
+    def __init__(self, mapping):
+        self._mapping = mapping
+        self._elffile = ELFFile(open(mapping.pathname, 'rb'))
+    
+    def extract_functions(self):
+        for symbol in self._elffile.get_section_by_name('.symtab').iter_symbols():
+            if symbol.entry.st_info.type == 'STT_FUNC':
+                name = symbol.name
+                low_pc = symbol.entry.st_value + self._offset
+                high_pc = symbol.entry.st_value + symbol.entry.st_size + self._offset
+                yield _function(name, low_pc, high_pc)
+        if not self._elffile.has_dwarf_info():
+            return
+        dwarfinfo = self._elffile.get_dwarf_info()
+        for cu in dwarfinfo.iter_CUs():
+            for die in cu.iter_DIEs():
+                if die.tag == "DW_TAG_subprogram":
+                    low_pc = c.attributes['DW_AT_low_pc'].value + self._offset
+                    high_pc_class = describe_form_class(die.attributes['DW_AT_high_pc'].form)
+                    if high_pc_class == 'address':
+                        high_pc = die.attributes['DW_AT_high_pc'].value + self._offset
+                    else:
+                        high_pc = die.attributes['DW_AT_high_pc'].value + low_pc
+                    name =  die.attributes['DW_AT_name'].value
+                    yield _function(name, low_pc, high_pc)
+            
+    def extract_source_lines(self):
+        if not self._elffile.has_dwarf_info():
+            return
+        dwarfinfo = self._elffile.get_dwarf_info()
+        for cu in dwarfinfo.iter_CUs():
+            line_program = dwarfinfo.line_program_for_CU(cu)
+            for entry in line_program.get_entries():
+                if entry.state:
+                    filename = line_program['file_entry'][entry.state.file - 1].name
+                    line_number = entry.state.line
+                    address = entry.state.address + self._offset
+                    yield _line(filename, line_number, address)
+
+
+def _maps(pid):
+    for line in open("/proc/%d/maps" % (pid,)):
+        row = line.split()
+        if len(row) > 5:
+            pathname = row[5]
+        else:
+            pathname = None
+        if len(row) > 4:
+            inode = int(row[4])
+        else:
+            inode = None
+        if len(row) > 3:
+            device = row[3]
+        else: 
+            device = None
+        offset = int(row[2], 16)
+        _perms = row[1]
+        r = _perms[0] != '-'
+        w = _perms[1] != '-'
+        x = _perms[2] != '-'
+        p = _perms[3] == 'p'
+        s = _perms[3] == 's'
+        _lower, _upper = row[0].split('-', 1)
+        lower = int(_lower, 16)
+        upper = int(_upper, 16)
+        yield _mapping(lower, upper, r, w, x, s, p, offset, device, inode, pathname)
 
 
 class _Debugger:
-    def __init__(self, pid):
+    def __init__(self, pid, path):
         self._pid = pid
+        self._path = path
         self._mem_fd = os.open("/proc/%d/mem" % (pid,), os.O_RDWR)
 
     def _cont(self):
@@ -26,31 +126,8 @@ class _Debugger:
         return os.waitpid(self._pid, 0)
 
     def _maps(self):
-        for line in open("/proc/%d/maps" % (self._pid,)):
-            row = line.split()
-            if len(row) > 5:
-                pathname = row[5]
-            else:
-                pathname = None
-            if len(row) > 4:
-                inode = int(row[4])
-            else:
-                inode = None
-            if len(row) > 3:
-                device = row[3]
-            else: 
-                device = None
-            offset = int(row[2], 16)
-            _perms = row[1]
-            r = _perms[0] != '-'
-            w = _perms[1] != '-'
-            x = _perms[2] != '-'
-            p = _perms[3] == 'p'
-            s = _perms[3] == 's'
-            _lower, _upper = row[0].split('-', 1)
-            lower = int(_lower, 16)
-            upper = int(_upper, 16)
-            yield _mapping(lower, upper, r, w, x, s, p, offset, device, inode, pathname)
+        for mapping in _maps(self._pid):
+            yield mapping
 
     def _read(self, offset, byte_len):
         os.lseek(self._mem_fd, offset, os.SEEK_SET)
@@ -84,7 +161,7 @@ def create_debugger(executable_path, *args):
         os.execv(exec_path, [os.path.basename(exec_path)] + list(args)) # Run the debug target
     else:
         os.waitpid(child_pid, 0)
-        return _Debugger(child_pid)
+        return _Debugger(child_pid, exec_path)
 
 
 __ALL__ = ['create_debugger', 'DebuggingError']
