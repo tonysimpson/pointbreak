@@ -1,6 +1,7 @@
 import os
 import sys
 import signal
+import re
 import pyptrace
 import distorm3
 from collections import namedtuple
@@ -29,6 +30,7 @@ def _mapping_file_address_bounds(elf, mapping):
                 return (lower, upper), seg.header.p_vaddr
     raise UnknownMapping()
 
+elftools_dwarf_parser_is_too_slow = True
 
 def _extract_symbols(mapping):
     elf = ELFFile(open(mapping.pathname, 'rb'))
@@ -41,27 +43,28 @@ def _extract_symbols(mapping):
                     low_pc = symbol.entry.st_value + mapping.lower - vaddr
                     high_pc = symbol.entry.st_value + symbol.entry.st_size + mapping.lower - vaddr
                     yield _function(name, low_pc, high_pc)
-    if not elf.has_dwarf_info():
+    if not elf.has_dwarf_info() or elftools_dwarf_parser_is_too_slow:
         return
     dwarfinfo = elf.get_dwarf_info()
     for cu in dwarfinfo.iter_CUs():
         for die in cu.iter_DIEs():
             if die.tag == "DW_TAG_subprogram":
                 if 'DW_AT_low_pc' in die.attributes and (lower <= die.attributes['DW_AT_low_pc'].value - vaddr) <= upper:
-                    low_pc = die.attributes['DW_AT_low_pc'].value + mapping.lower - vaddr
-                    high_pc_class = describe_form_class(die.attributes['DW_AT_high_pc'].form)
-                    if high_pc_class == 'address':
-                        high_pc = die.attributes['DW_AT_high_pc'].value + mapping.lower - vaddr
-                    else:
-                        high_pc = die.attributes['DW_AT_high_pc'].value + low_pc
-                    name =  die.attributes['DW_AT_name'].value
-                    yield _function(name, low_pc, high_pc)
+                    if 'DW_AT_name' in die.attributes:
+                        low_pc = die.attributes['DW_AT_low_pc'].value + mapping.lower - vaddr
+                        high_pc_class = describe_form_class(die.attributes['DW_AT_high_pc'].form)
+                        if high_pc_class == 'address':
+                            high_pc = die.attributes['DW_AT_high_pc'].value + mapping.lower - vaddr
+                        else:
+                            high_pc = die.attributes['DW_AT_high_pc'].value + low_pc
+                        name = die.attributes['DW_AT_name'].value
+                        yield _function(name, low_pc, high_pc)
 
 
 def _extract_lines(mapping):
     elf = ELFFile(open(mapping.pathname, 'rb'))
     (lower, upper), vaddr = _mapping_file_address_bounds(elf, mapping)
-    if not elf.has_dwarf_info():
+    if not elf.has_dwarf_info() or elftools_dwarf_parser_is_too_slow:
         return
     dwarfinfo = elf.get_dwarf_info()
     for cu in dwarfinfo.iter_CUs():
@@ -118,12 +121,38 @@ class _SymbolsCache:
             self._seen_maps.add(mapping)
 
 
+EVENT_NAME_STOPPED = "STOP"
+EVENT_NAME_TRAP = "TRAP"
+EVENT_NAME_EXITED = "EXIT"
+EVENT_NAME_TERMINATED = "TERM"
+
+
+class Event:
+    def __init__(self, name, **attrs):
+        self.name = name
+        self._attrs = attrs
+
+    def __getattr__(self, name):
+        try:
+            return self._attrs[name]
+        except KeyError:
+            raise AttributeError(name)
+
+    def __repr__(self):
+        return "Event(name=%r, **%r)" % (self.name, self._attrs)
+
+
 class _Debugger:
     def __init__(self, pid, path):
         self._pid = pid
         self._path = path
         self._mem_fd = os.open("/proc/%d/mem" % (pid,), os.O_RDWR)
+        self._bp_original_byte = {}
+        self._bp_callbacks = {}
         self._sym_cache = _SymbolsCache()
+        self._dead = False
+        self._update_symbols()
+        self._restore_trap_address = None
     
     def _update_symbols(self):
         for mapping in self._maps():
@@ -133,11 +162,103 @@ class _Debugger:
                 except UnknownMapping:
                     pass
 
+    def _call_and_reinstall_traps(self):
+        regs = self._get_registers()
+        address = regs.rip - 1
+        if address in self._bp_original_byte:
+            # restore the original byte if any
+            self._write(address, self._bp_original_byte[address])
+            # because we're in a debugger inserted trap also restore rip
+            regs.rip = address
+            self._set_registers(regs)
+        to_reinstall = []
+        if address in self._bp_callbacks:
+            for cb in self._bp_callbacks[address]:
+                if cb(self):
+                    to_reinstall.append(cb)
+        if to_reinstall:
+            # if we have an original then we need to restore the int 3
+            if address in self._bp_original_byte:
+                self._restore_trap_address = address
+            self._bp_callbacks[address] = to_reinstall
+        else:
+            if address in self._bp_original_byte:
+                del self._bp_original_byte[address]
+            if address in self._bp_callbacks:
+                del self._bp_callbacks[address]
+            self._restore_trap_address = None
+
+    def _call_for_event(self, event):
+        pass
+
+    def _get_addresses(self, pattern):
+        if isinstance(pattern, int):
+            return [pattern]
+        results = set()
+        if not hasattr('match', pattern):
+            pattern = re.compile(pattern)
+        for name, functions in self._sym_cache._names_to_functions.items():
+            if pattern.match(name):
+                for func in functions:
+                    results.add(func.lower_address)
+        return list(results)
+                
+    def next_event(self):
+        if self._dead:
+            raise DebuggingError("Called next_event after %r or %r Event" % (EVENT_NAME_EXITED, EVENT_NAME_TERMINATED))
+        if self._restore_trap_address is not None:
+            self._single_step()
+            self._wait()
+            self._write(self._restore_trap_address, '\xcc')
+            self._restore_trap_address = None
+        self._cont()
+        status = self._wait()
+        event = None
+        if os.WIFSTOPPED(status):
+            sig = os.WSTOPSIG(status)
+            if sig == signal.SIGTRAP:
+                event = Event(EVENT_NAME_TRAP)
+                self._call_and_reinstall_traps()
+            else:
+                event = Event(EVENT_NAME_STOPPED, signal=sig)
+        elif os.WIFEXITED(status):
+            self._dead = True
+            exit_status = os.WEXITSTATUS(status)
+            event = Event(EVENT_NAME_EXITED, status=exit_status)
+        elif os.WIFSIGNALED(status):
+            self._dead = True
+            sig = os.WTERMSIG(status)
+            event = Event(EVENT_NAME_TERMINATED, signal=sig)
+        self._call_for_event(event)
+        return event
+    
+    def continue_none_stop(self):
+        while True:
+            event = self.next_event()
+            if event.name in (EVENT_NAME_EXITED, EVENT_NAME_TERMINATED):
+                return event
+
+    def _install_trap(self, address, callback):
+        original = self._read(address, 1)
+        if original != b'\xcc':
+            self._bp_original_byte[address] = original
+            self._write(address, b'\xcc')
+        self._bp_callbacks.setdefault(address, []).append(callback)
+
+    def _single_step(self):
+        pyptrace.singlestep(self._pid)
+
     def _cont(self):
         pyptrace.cont(self._pid)
 
+    def _get_registers(self):
+        return pyptrace.getregs(self._pid)[1]
+
+    def _set_registers(self, registers):
+        return pyptrace.setregs(self._pid, registers)
+
     def _wait(self):
-        return os.waitpid(self._pid, 0)
+        return os.waitpid(self._pid, 0)[1]
 
     def _maps(self):
         for mapping in _maps(self._pid):
@@ -147,7 +268,8 @@ class _Debugger:
         os.lseek(self._mem_fd, offset, os.SEEK_SET)
         b = os.read(self._mem_fd, byte_len)
         os.lseek(self._mem_fd, 0, os.SEEK_SET)
-        raise DebuggingError("Incomplete read: read %d wanted %d" % (len(b), byte_len))
+        if len(b) != byte_len:
+            raise DebuggingError("Incomplete read: read %d wanted %d" % (len(b), byte_len))
         return b
 
     def _write(self, offset, bytes_to_write):
