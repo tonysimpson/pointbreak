@@ -26,62 +26,52 @@ def _mapping_file_address_bounds(elf, mapping):
     for seg in elf.iter_segments():
         if seg.header.p_type == "PT_LOAD":
             if lower <= seg.header.p_offset <= upper:
-                return (lower, upper), lower - seg.header.p_vaddr
+                return (lower, upper), seg.header.p_vaddr
     raise UnknownMapping()
 
 
 def _extract_symbols(mapping):
     elf = ELFFile(open(mapping.pathname, 'rb'))
-    (lower, upper), offset = _mapping_file_address_bounds(elf, mapping)
-    for symbol in elf.get_section_by_name('.symtab').iter_symbols():
-        if symbol.entry.st_info.type == 'STT_FUNC':
-            if lower <= symbol.entry.st_value <= upper:
-                name = symbol.name
-                low_pc = symbol.entry.st_value
-                high_pc = symbol.entry.st_value
-                yield _function(name, low_pc, high_pc)
-
-
-
-
-class _ElfDwarfSymbolExtractor:
-    def __init__(self, mapping):
-        self._mapping = mapping
-        self._elffile = ELFFile(open(mapping.pathname, 'rb'))
-    
-    def extract_functions(self):
-        for symbol in self._elffile.get_section_by_name('.symtab').iter_symbols():
+    (lower, upper), vaddr = _mapping_file_address_bounds(elf, mapping)
+    if elf.get_section_by_name('.symtab') is not None:
+        for symbol in elf.get_section_by_name('.symtab').iter_symbols():
             if symbol.entry.st_info.type == 'STT_FUNC':
-                name = symbol.name
-                low_pc = symbol.entry.st_value + self._offset
-                high_pc = symbol.entry.st_value + symbol.entry.st_size + self._offset
-                yield _function(name, low_pc, high_pc)
-        if not self._elffile.has_dwarf_info():
-            return
-        dwarfinfo = self._elffile.get_dwarf_info()
-        for cu in dwarfinfo.iter_CUs():
-            for die in cu.iter_DIEs():
-                if die.tag == "DW_TAG_subprogram":
-                    low_pc = c.attributes['DW_AT_low_pc'].value + self._offset
+                if lower <= (symbol.entry.st_value - vaddr) <= upper:
+                    name = symbol.name
+                    low_pc = symbol.entry.st_value + mapping.lower - vaddr
+                    high_pc = symbol.entry.st_value + symbol.entry.st_size + mapping.lower - vaddr
+                    yield _function(name, low_pc, high_pc)
+    if not elf.has_dwarf_info():
+        return
+    dwarfinfo = elf.get_dwarf_info()
+    for cu in dwarfinfo.iter_CUs():
+        for die in cu.iter_DIEs():
+            if die.tag == "DW_TAG_subprogram":
+                if 'DW_AT_low_pc' in die.attributes and (lower <= die.attributes['DW_AT_low_pc'].value - vaddr) <= upper:
+                    low_pc = die.attributes['DW_AT_low_pc'].value + mapping.lower - vaddr
                     high_pc_class = describe_form_class(die.attributes['DW_AT_high_pc'].form)
                     if high_pc_class == 'address':
-                        high_pc = die.attributes['DW_AT_high_pc'].value + self._offset
+                        high_pc = die.attributes['DW_AT_high_pc'].value + mapping.lower - vaddr
                     else:
                         high_pc = die.attributes['DW_AT_high_pc'].value + low_pc
                     name =  die.attributes['DW_AT_name'].value
                     yield _function(name, low_pc, high_pc)
-            
-    def extract_source_lines(self):
-        if not self._elffile.has_dwarf_info():
-            return
-        dwarfinfo = self._elffile.get_dwarf_info()
-        for cu in dwarfinfo.iter_CUs():
-            line_program = dwarfinfo.line_program_for_CU(cu)
-            for entry in line_program.get_entries():
-                if entry.state:
+
+
+def _extract_lines(mapping):
+    elf = ELFFile(open(mapping.pathname, 'rb'))
+    (lower, upper), vaddr = _mapping_file_address_bounds(elf, mapping)
+    if not elf.has_dwarf_info():
+        return
+    dwarfinfo = elf.get_dwarf_info()
+    for cu in dwarfinfo.iter_CUs():
+        line_program = dwarfinfo.line_program_for_CU(cu)
+        for entry in line_program.get_entries():
+            if entry.state:
+                if lower <= (entry.state.address - vaddr) <= upper:
                     filename = line_program['file_entry'][entry.state.file - 1].name
                     line_number = entry.state.line
-                    address = entry.state.address + self._offset
+                    address = entry.state.address + mapping.lower - vaddr
                     yield _line(filename, line_number, address)
 
 
@@ -111,6 +101,21 @@ def _maps(pid):
         lower = int(_lower, 16)
         upper = int(_upper, 16)
         yield _mapping(lower, upper, r, w, x, s, p, offset, device, inode, pathname)
+            
+
+class _SymbolsCache:
+    def __init__(self):
+        self._seen_maps = set()
+        self._names_to_functions = {}
+        self._files_to_lines = {}
+
+    def register_mapping(self, mapping):
+        if mapping not in self._seen_maps:
+            for function in _extract_symbols(mapping):
+                self._names_to_functions.setdefault(function.name, []).append(function)
+            for line in _extract_lines(mapping):
+                self._files_to_lines.setdefault(line.filename, []).append(line)
+            self._seen_maps.add(mapping)
 
 
 class _Debugger:
@@ -118,6 +123,15 @@ class _Debugger:
         self._pid = pid
         self._path = path
         self._mem_fd = os.open("/proc/%d/mem" % (pid,), os.O_RDWR)
+        self._sym_cache = _SymbolsCache()
+    
+    def _update_symbols(self):
+        for mapping in self._maps():
+            if mapping.pathname is not None and os.path.exists(mapping.pathname):
+                try:
+                    self._sym_cache.register_mapping(mapping)
+                except UnknownMapping:
+                    pass
 
     def _cont(self):
         pyptrace.cont(self._pid)
