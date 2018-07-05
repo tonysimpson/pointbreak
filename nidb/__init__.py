@@ -112,9 +112,12 @@ class _SymbolsCache:
         self._names_to_functions = {}
         self._files_to_lines = {}
 
-    def register_mapping(self, mapping):
+    def register_mapping(self, mapping, debugger):
         if mapping not in self._seen_maps:
             for function in _extract_symbols(mapping):
+                for pattern, cb in debugger._breakpoints:
+                    if pattern.match(function.name):
+                        debugger._install_trap(function.lower_address, cb)
                 self._names_to_functions.setdefault(function.name, []).append(function)
             for line in _extract_lines(mapping):
                 self._files_to_lines.setdefault(line.filename, []).append(line)
@@ -153,12 +156,13 @@ class _Debugger:
         self._dead = False
         self._update_symbols()
         self._restore_trap_address = None
+        self._breakpoints = []
     
     def _update_symbols(self):
         for mapping in self._maps():
             if mapping.pathname is not None and os.path.exists(mapping.pathname):
                 try:
-                    self._sym_cache.register_mapping(mapping)
+                    self._sym_cache.register_mapping(mapping, self)
                 except UnknownMapping:
                     pass
 
@@ -192,11 +196,7 @@ class _Debugger:
         pass
 
     def _get_addresses(self, pattern):
-        if isinstance(pattern, int):
-            return [pattern]
         results = set()
-        if not hasattr('match', pattern):
-            pattern = re.compile(pattern)
         for name, functions in self._sym_cache._names_to_functions.items():
             if pattern.match(name):
                 for func in functions:
@@ -244,6 +244,13 @@ class _Debugger:
             self._bp_original_byte[address] = original
             self._write(address, b'\xcc')
         self._bp_callbacks.setdefault(address, []).append(callback)
+
+    def add_breakpoint(self, pattern, callback):
+        if not hasattr('match', pattern):
+            pattern = re.compile(pattern)
+        self._breakpoints.append(pattern, callback)
+        for address in self._get_addresses(pattern):
+            self._install_trap(address, callback)
 
     def _single_step(self):
         pyptrace.singlestep(self._pid)
