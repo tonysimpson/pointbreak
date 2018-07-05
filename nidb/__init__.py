@@ -154,9 +154,9 @@ class _Debugger:
         self._bp_callbacks = {}
         self._sym_cache = _SymbolsCache()
         self._dead = False
+        self._breakpoints = []
         self._update_symbols()
         self._restore_trap_address = None
-        self._breakpoints = []
     
     def _update_symbols(self):
         for mapping in self._maps():
@@ -248,7 +248,7 @@ class _Debugger:
     def add_breakpoint(self, pattern, callback):
         if not hasattr('match', pattern):
             pattern = re.compile(pattern)
-        self._breakpoints.append(pattern, callback)
+        self._breakpoints.append((pattern, callback))
         for address in self._get_addresses(pattern):
             self._install_trap(address, callback)
 
