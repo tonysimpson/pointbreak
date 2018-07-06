@@ -1,6 +1,7 @@
 import os
 import sys
 import signal
+import struct
 import re
 import pyptrace
 import distorm3
@@ -35,8 +36,11 @@ elftools_dwarf_parser_is_too_slow = True
 def _extract_symbols(mapping):
     elf = ELFFile(open(mapping.pathname, 'rb'))
     (lower, upper), vaddr = _mapping_file_address_bounds(elf, mapping)
-    if elf.get_section_by_name('.symtab') is not None:
-        for symbol in elf.get_section_by_name('.symtab').iter_symbols():
+    section = elf.get_section_by_name('.symtab')
+    if section is None:
+        section = elf.get_section_by_name('.dynsym')
+    if section is not None:
+        for symbol in section.iter_symbols():
             if symbol.entry.st_info.type == 'STT_FUNC':
                 if lower <= (symbol.entry.st_value - vaddr) <= upper:
                     name = symbol.name
@@ -145,6 +149,28 @@ class Event:
         return "Event(name=%r, **%r)" % (self.name, self._attrs)
 
 
+class Registers:
+    def __init__(self, debugger):
+        self.__dict__['_register_names'] = debugger._register_names
+        self.__dict__['_gr'] = debugger._get_registers
+        self.__dict__['_sr'] = debugger._set_registers
+
+    def __dir__(self):
+        return [field for field in self._register_names]
+
+    def __getattr__(self, name):
+        return getattr(self._gr(), name)
+
+    def __setattr__(self, name, value):
+        regs = self._gr()
+        setattr(regs, name, value)
+        self._sr(regs)
+    
+    def __repr__(self):
+        regs = self._gr()
+        return "Registers(%s)" % (', '.join(["%s=%r" % (field, getattr(regs, field)) for field in self._register_names]), )
+
+
 class _Debugger:
     def __init__(self, pid, path):
         self._pid = pid
@@ -157,6 +183,7 @@ class _Debugger:
         self._breakpoints = []
         self._update_symbols()
         self._restore_trap_address = None
+        self._register_names = set(field[0] for field in self._get_registers()._fields_)
     
     def _update_symbols(self):
         for mapping in self._maps():
@@ -264,6 +291,10 @@ class _Debugger:
     def _set_registers(self, registers):
         return pyptrace.setregs(self._pid, registers)
 
+    @property
+    def registers(self):
+        return Registers(self)
+
     def _wait(self):
         return os.waitpid(self._pid, 0)[1]
 
@@ -286,6 +317,13 @@ class _Debugger:
         if num_written != len(bytes_to_write):
             raise DebuggingError("Incomplete write: wrote %d wanted %d" % (num_written, len(bytes_to_write)))
 
+    def read_fmt(self, offset, fmt):
+        size = struct.calcsize(fmt)
+        b = self._read(offset, size)
+        return struct.unpack(fmt, b)
+
+    def write_fmt(self, offset, fmt, *values):
+        self._write(offset, struct.pack(fmt, *values))
 
 def create_debugger(executable_path, *args):
     if os.path.exists(executable_path): 
