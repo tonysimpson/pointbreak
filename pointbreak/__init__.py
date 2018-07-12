@@ -578,7 +578,7 @@ class _Debugger:
         self._seek(offset)
         while True:
             b = os.read(self._mem_fd, 1)
-            if b == '\x00':
+            if b == b'\x00':
                 break
             buffer.append(b)
         return ''.join(buffer)
