@@ -263,7 +263,7 @@ class Trap:
         if self.is_user_inserted():
             debugger._single_step()
             debugger._wait()
-            debugger._write(self.address, '\xcc')
+            debugger._write(self.address, b'\xcc')
 
 
 class Breakpoint:

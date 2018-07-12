@@ -17,5 +17,5 @@ def create_callable_from_machine_code(machine_code, doc=None, restype=None, argt
     return func
 
 
-breakpoint = create_callable_from_machine_code('\xCC\xC3')
+breakpoint = create_callable_from_machine_code(b'\xCC\xC3')
 
