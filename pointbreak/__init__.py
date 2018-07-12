@@ -581,7 +581,7 @@ class _Debugger:
             if b == b'\x00':
                 break
             buffer.append(b)
-        return ''.join(buffer)
+        return b''.join(buffer).decode('utf8')
 
     def read_fmt(self, offset, fmt):
         size = struct.calcsize(fmt)
