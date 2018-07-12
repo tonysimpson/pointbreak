@@ -31,7 +31,7 @@ Boo!
 Boo!
 ```
 because our python function is getting called each time there_is_a_ghost is called.
-There are more example in the example directory.
+There are more examples in the examples directory.
 
 ## ghost.c
 ```C
