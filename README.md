@@ -14,8 +14,8 @@ Pointbreak is designed to make debugging and analysing complex things like JITs 
 
 ## Disadvantage
 * Early developement
-* Missing many standard debugger features - see Issues
-* Python 2.7 only and other issues see Issues
+* Missing many standard debugger features
+* Other issues see https://github.com/tonysimpson/pointbreak/issues
 
 # Example print BOO! when function is called
 If you compile `gcc ghost.c -o ghost` and run `./ghost` nothing much happens

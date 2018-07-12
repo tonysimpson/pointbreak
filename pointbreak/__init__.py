@@ -274,7 +274,7 @@ class Breakpoint:
         self._re_pattern = None
         self._address = None
         if isinstance(value, numbers.Number):
-            self._address = long(value)
+            self._address = int(value)
         else:
             self._re_pattern = re.compile(value)
 
@@ -568,7 +568,7 @@ class _Debugger:
             raise PointBreakException("Incomplete write: wrote %d wanted %d" % (num_written, len(bytes_to_write)))
   
     def _seek(self, offset):
-        if offset <= 9223372036854775807L: # MAX_LONG
+        if offset <= 9223372036854775807: # MAX_LONG
             return os.lseek(self._mem_fd, offset, os.SEEK_SET)
         else:
             return lseek64(self._mem_fd, offset, os.SEEK_SET)
