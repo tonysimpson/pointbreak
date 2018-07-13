@@ -10,7 +10,7 @@ def test_loading_dynamic_library_and_breaking_on_function():
         bp = db.add_breakpoint('PyInit_itertools')
     event = db.next_event()
     if not event.is_last_event():
-        db.continue_none_stop()
+        db.continue_to_last_event()
     assert event.name == pointbreak.EVENT_NAME_TRAP
     assert bp in event.triggered, "break point should be triggered"
 

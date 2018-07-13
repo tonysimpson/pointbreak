@@ -473,7 +473,7 @@ class _Debugger:
             if event is not None:
                 return event
     
-    def continue_none_stop(self, timeout=None):
+    def continue_to_last_event(self, timeout=None):
         while True:
             event = self.next_event(timeout=timeout)
             if event.is_last_event():

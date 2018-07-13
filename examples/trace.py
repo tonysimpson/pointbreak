@@ -29,5 +29,5 @@ class Tracer:
 tracer = Tracer()
 db = pointbreak.create_debugger('python', '-c', 'import itertools')
 db.add_breakpoint('.*', tracer.trace)
-db.continue_none_stop()
+db.continue_to_last_event()
 

@@ -6,7 +6,7 @@ def test_breakpoint_on_main():
     bp = db.add_breakpoint('main')
     event = db.next_event()
     if not event.is_last_event():
-        db.continue_none_stop()
+        db.continue_to_last_event()
     assert event.name == pointbreak.EVENT_NAME_TRAP
     assert bp in event.triggered, "break point should be triggered"
 
@@ -16,5 +16,5 @@ def test_existing_breakpoint_in_program():
     event = db.next_event()
     assert event.name == pointbreak.EVENT_NAME_TRAP
     if not event.is_last_event():
-        db.continue_none_stop()
+        db.continue_to_last_event()
 
