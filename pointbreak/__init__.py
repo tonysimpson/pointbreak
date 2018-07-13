@@ -473,6 +473,13 @@ class _Debugger:
             if event is not None:
                 return event
     
+    def single_step(self, timeout=None):
+        if self._dead:
+            raise PointBreakException("Called single_step after %r or %r Event" % (EVENT_NAME_EXITED, EVENT_NAME_TERMINATED))
+        self._single_step()
+        status = self._wait(timeout=timeout)
+        return self._do_status_to_event_or_none(status)
+
     def continue_to_last_event(self, timeout=None):
         while True:
             event = self.next_event(timeout=timeout)
@@ -613,7 +620,6 @@ def create_debugger(executable_path, *args, **kwargs):
         # I'm the child
         pyptrace.traceme() # Enable tracing
         os.execv(exec_path, [os.path.basename(exec_path)] + list(args)) # Run the debug target
-    
     else:
         os.waitpid(child_pid, 0)
         pyptrace.setoptions(child_pid, pyptrace.PTRACE_O_EXITKILL)
