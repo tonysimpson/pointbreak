@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="pointbreak",
-    version="0.0.1",
+    version="0.0.2",
     author="Tony Simpson",
     author_email="agjasimpson@gmail.com",
     description="System process debug and analysis library.",
