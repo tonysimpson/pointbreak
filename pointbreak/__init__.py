@@ -283,7 +283,12 @@ class Breakpoint:
         return self._address
 
     def matches_symbol(self, symbol_description):
-        return self._re_pattern is not None and self._re_pattern.match(symbol_description)
+        if self._re_pattern is not None:
+            return False
+        m = self._re_pattern.match(symbol_description)
+        if m is None or m.end() != len(symbol_description):
+            return False
+        return True # we fully matched the symbol
 
     def __repr__(self):
         return "Breakpoint(value={!r}, callback={!r}, secret={!r})".format(self.value, self.callback, self.secret)
