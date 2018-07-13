@@ -122,7 +122,7 @@ class Symbols:
         for symbol in extract_symbols(pathname, load_address, use_vaddr):
             self.symbols.append(symbol)
             if symbol.is_code and symbol.name is not None and symbol.low_addr != 0:
-                debugger._new_symbol(symbol.name, symbol.low_addr)
+                debugger._new_symbol(symbol)
 
     def load_program(self, debugger, pathname):
         self._load(debugger, pathname, 0, use_vaddr=False)
@@ -136,7 +136,7 @@ class Symbols:
     def iter_code_symbols(self):
         for symbol in self.symbols:
             if symbol.is_code and symbol.name is not None and symbol.low_addr != 0:
-                yield symbol.name, symbol.low_addr
+                yield symbol
 
     def address_to_symbols(self, address):
         return [sym for sym in self.symbols if sym.low_addr <= address < sym.high_addr]
@@ -278,17 +278,25 @@ class Breakpoint:
         else:
             self._re_pattern = re.compile(value)
 
-    @property
-    def address(self):
-        return self._address
+    def address_from_symbol(self, symbol):
+        if self._address is not None:
+            return self._address
+        return symbol.low_addr
 
-    def matches_symbol(self, symbol_description):
-        if self._re_pattern is not None:
-            return False
-        m = self._re_pattern.match(symbol_description)
-        if m is None or m.end() != len(symbol_description):
-            return False
-        return True # we fully matched the symbol
+    def match(self, symbol):
+        if symbol is None:
+            if self._address is not None:
+                return True
+            else:
+                return False
+        if self._re_pattern is not None and symbol.name is not None:
+            m = self._re_pattern.match(symbol.name)
+            if m and m.end() == len(symbol.name):
+                return True
+        if self._address is not None:
+            if symbol.low_addr <= self._address < symbol.high_addr:
+                return True
+        return False
 
     def __repr__(self):
         return "Breakpoint(value={!r}, callback={!r}, secret={!r})".format(self.value, self.callback, self.secret)
@@ -491,7 +499,8 @@ class _Debugger:
             if event.is_last_event():
                 return event
 
-    def _install_trap(self, address, breakpoint):
+    def _install_trap(self, symbol, breakpoint):
+        address = breakpoint.address_from_symbol(symbol)
         if address in self._address_to_trap:
             self._address_to_trap[address].add_breakpoint(breakpoint)
         else:
@@ -504,21 +513,19 @@ class _Debugger:
             trap.add_breakpoint(breakpoint)
             self._address_to_trap[address] = trap
 
-    def _new_symbol(self, symbol_description, address):
+    def _new_symbol(self, symbol):
+        # XXX should uninstall traps with address is in symbol here?
+        # needs some work
         for breakpoint in self._breakpoints:
-            if breakpoint.matches_symbol(symbol_description):
-                self._install_trap(address, breakpoint)
+            if breakpoint.match(symbol):
+                self._install_trap(symbol, breakpoint)
 
     def _new_breakpoint(self, breakpoint):
-        addresses = set()
-        if breakpoint.address is not None:
-            addresses.add(breakpoint.address)
-        else:
-            for name, address in self._symbols.iter_code_symbols():
-                if breakpoint.matches_symbol(name):
-                    addresses.add(address)
-        for address in addresses:
-            self._install_trap(address, breakpoint)
+        if breakpoint.match(None):
+            self._install_trap(None, breakpoint)
+        for symbol in self._symbols.iter_code_symbols():
+            if breakpoint.match(symbol):
+                self._install_trap(symbol, breakpoint)
 
     def add_breakpoint(self, value, callback=None, immediately=False, secret=False):
         if callback is None:
@@ -610,10 +617,8 @@ class _Debugger:
             return self._do_status_to_event_or_none(status)
         raise PointBreakException("Called kill after %r or %r Event" % (EVENT_NAME_EXITED, EVENT_NAME_TERMINATED))
 
-
     def __del__(self):
         self.kill()
-
 
 
 def create_debugger(executable_path, *args, **kwargs):
