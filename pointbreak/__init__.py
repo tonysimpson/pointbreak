@@ -598,6 +598,18 @@ class _Debugger:
     def write_fmt(self, offset, fmt, *values):
         self._write(offset, struct.pack(fmt, *values))
 
+    def kill(self):
+        if not self._dead:
+            os.kill(self._pid, signal.SIGKILL)
+            status = self._wait()
+            return self._do_status_to_event_or_none(status)
+        raise PointBreakException("Called kill after %r or %r Event" % (EVENT_NAME_EXITED, EVENT_NAME_TERMINATED))
+
+
+    def __del__(self):
+        self.kill()
+
+
 
 def create_debugger(executable_path, *args, **kwargs):
     timeout = None
