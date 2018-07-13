@@ -139,7 +139,7 @@ class Symbols:
                 yield symbol.name, symbol.low_addr
 
     def address_to_symbols(self, address):
-        return [sym for sym in self.symbols if sym.low_addr <= address <= sym.high_addr]
+        return [sym for sym in self.symbols if sym.low_addr <= address < sym.high_addr]
 
 
 EVENT_NAME_STOPPED = "STOP"
