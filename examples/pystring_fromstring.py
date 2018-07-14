@@ -11,5 +11,6 @@ def print_string_arg1(db):
 
 db = pointbreak.create_debugger('python', '-c', 'import itertools')
 db.add_breakpoint('PyString_FromString$', print_string_arg1)
-db.continue_to_last_event()
+db.add_breakpoint('PyUnicode_FromString$', print_string_arg1)
+db.continue_none_stop()
 
