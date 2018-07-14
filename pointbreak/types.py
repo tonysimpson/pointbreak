@@ -88,7 +88,6 @@ class attached_array:
         return [i.detach() for i in self]
 
 
-
 class struct:
     def __init__(self, *fields):
         pass
@@ -107,7 +106,6 @@ class field:
 class null_term_string:
     def __init__(self):
         pass
-        
 
 
 class variable_sized_array:
@@ -129,7 +127,6 @@ class reference:
     
     def detach(self):
         self._attached.detach()
-
 
 
 char = mtype('char', 'c')
