@@ -1,12 +1,12 @@
-import struct
+import struct as _struct
 
 
 class mtype:
     def __init__(self, name, format):
         self.name = name
         self.format = format
-        self._alignment = struct.calcsize(self.format)
-        self._size = struct.calcsize(self.format)
+        self._alignment = _struct.calcsize(self.format)
+        self._size = _struct.calcsize(self.format)
     
     @property
     def alignment(self):
@@ -66,13 +66,13 @@ class attached_array:
         if 0 > index >= len(self):
             raise IndexError('Index error for attached_array')
         offset = self._offset + (index * self._array_type.contained_type.size)
-        return self._array_type.attach(offset, self._accessor).getter(None)
+        return self._array_type.contained_type.attach(offset, self._accessor).getter()
 
     def __setitem__(self, index, value):
         if 0 > index >= len(self):
             raise IndexError('Index error for attached_array')
         offset = self._offset + (index * self._array_type.contained_type.size)
-        return self._array_type.attach(offset, self._accessor).setter(None, value)
+        return self._array_type.contained_type.attach(offset, self._accessor).setter(value)
 
     def getter(self):
         return self
@@ -85,7 +85,12 @@ class attached_array:
             self[num] = v
 
     def detach(self):
-        return [i.detach() for i in self]
+        results = []
+        for i in range(len(self)):
+            offset = self._offset + (i * self._array_type.contained_type.size)
+            v = self._array_type.contained_type.attach(offset, self._accessor).detach()
+            results.append(v)
+        return results
 
 
 class struct:
@@ -126,7 +131,7 @@ class reference:
         self._attached.setter(value)
     
     def detach(self):
-        self._attached.detach()
+        return self._attached.detach()
 
 
 char = mtype('char', 'c')
@@ -134,8 +139,8 @@ int64 = mtype('int64', 'q')
 uint64 = mtype('uint64', 'Q')
 int32 = mtype('int32', 'i')
 uint32 = mtype('uint32', 'I')
-int16 = mtype('int16', 's')
-uint16 = mtype('uint16', 'S')
+int16 = mtype('int16', 'h')
+uint16 = mtype('uint16', 'H')
 int8 = mtype('int8', 'b')
 uint8 = mtype('uint8', 'B')
 

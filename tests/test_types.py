@@ -14,27 +14,56 @@ class Accessor:
         struct.pack_into(format, self.bytes, offset, value)
 
 
-def test_type_get_simple_vale():
+def test_type_get_simple_value():
     accessor = Accessor(b"\x01\x00\x00\x00")
     ref = types.reference(types.int32, 0, accessor)
     assert ref.value == 1
     
 
-def test_type_get_and_set_simple_vale():
+def test_type_set_simple_value():
     accessor = Accessor(b"\x00\x00\x00\x00")
     ref = types.reference(types.int32, 0, accessor)
     ref.value = 22
     assert ref.value == 22
 
 
-def test_array_type():
-    accessor = Accessor(b"\x01\x02\x03\x00")
+def test_type_get_array_value():
+    accessor = Accessor(b"\x01\x02\x03")
     uint8_array_3 = types.array_type(3, types.uint8)
     ref = types.reference(uint8_array_3, 0, accessor)
     assert ref.value[0] == 1
     assert ref.value[1] == 2
     assert ref.value[2] == 3
-    ref.value[1] == 5
+
+
+def test_type_set_array_value():
+    accessor = Accessor(b"\x00\x00\x00")
+    uint8_array_3 = types.array_type(3, types.uint8)
+    ref = types.reference(uint8_array_3, 0, accessor)
+    ref.value[1] = 5
     assert ref.value[1] == 5
 
+
+def test_set_whole_array():
+    accessor = Accessor(b"\x00\x00\x00\x00\x00")
+    uint8_array_5 = types.array_type(5, types.uint8)
+    ref = types.reference(uint8_array_5, 0, accessor)
+    value = [5,4,3,2,1]
+    ref.value = value
+    assert list(ref.value) == value
+
+def test_mulitdimensional_array():
+    accessor = Accessor(b'\x00\x00\x00\x00\x00\x00')
+    uint8_array_3_2 = types.array_type(3, types.array_type(2, types.uint8))
+    ref = types.reference(uint8_array_3_2, 0, accessor)
+    ref.value[0][0] = 244
+    ref.value[2][1] = 221
+    assert ref.value[0][0] == 244
+    assert ref.value[2][1] == 221
+
+def test_array_detach():
+    accessor = Accessor(b"\x00\x01\x00\x05\x00")
+    uint8_array_5 = types.array_type(5, types.uint8)
+    ref = types.reference(uint8_array_5, 0, accessor)
+    assert ref.detach() == [0, 1, 0, 5, 0]
 
