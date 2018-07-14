@@ -20,7 +20,23 @@ class mtype:
         return attached_mtype(self, offset, accessor)
 
 
-class array:
+class attached_mtype:
+    def __init__(self, mtype, offset, accessor):
+        self._mtype = mtype
+        self._offset = offset
+        self._accessor = accessor
+
+    def getter(self):
+        return self._accessor.read(self._offset, self._mtype.format)
+
+    def setter(self, value):
+        self._accessor.write(self._offset, self._mtype.format, value)
+
+    def detach(self):
+        return self.getter()
+
+
+class array_type:
     def __init__(self, length, contained_type):
         self.length = length
         self.contained_type = contained_type
@@ -36,20 +52,40 @@ class array:
     def attach(self, offset, accessor):
         return attached_array(self, offset, accessor)
 
+
 class attached_array:
-    def __init__(self, mtype, offset, accessor):
-        self._mtype = mtype
+    def __init__(self, array_type, offset, accessor):
+        self._array_type = array_type
         self._offset = offset
         self._accessor = accessor
 
-    def getter(self, ref):
-        return self._accessor.read(self._offset, self._mtype.format)
+    def __len__(self):
+        return self._array_type.length
 
-    def setter(self, ref, value):
-        self._accessor.write(self._offset, self._mtype.format, value)
+    def __getitem__(self, index):
+        if 0 > index >= len(self):
+            raise IndexError('Index error for attached_array')
+        offset = self._offset + (index * self._array_type.contained_type.size)
+        return self._array_type.attach(offset, self._accessor).getter(None)
 
-    def detach(self, ref):
-        return self.getter(ref)
+    def __setitem__(self, index, value):
+        if 0 > index >= len(self):
+            raise IndexError('Index error for attached_array')
+        offset = self._offset + (index * self._array_type.contained_type.size)
+        return self._array_type.attach(offset, self._accessor).setter(None, value)
+
+    def getter(self):
+        return self
+
+    def setter(self, value):
+        value = list(value)
+        if len(value) != self._array_type.length:
+            raise TypeError('setter value must be same length as attached_array')
+        for num, v in enumerate(value):
+            self[num] = v
+
+    def detach(self):
+        return [i.detach() for i in self]
 
 
 
@@ -70,6 +106,7 @@ class field:
 
 class null_term_string:
     def __init__(self):
+        pass
         
 
 
@@ -78,30 +115,21 @@ class variable_sized_array:
         pass
 
 
-
-
-class attached_mtype:
+class reference:
     def __init__(self, mtype, offset, accessor):
-        self._mtype = mtype
-        self._offset = offset
-        self._accessor = accessor
+        self._attached = mtype.attach(offset, accessor)
 
-    def getter(self, ref):
-        return self._accessor.read(self._offset, self._mtype.format)
+    @property
+    def value(self):
+        return self._attached.getter()
+    
+    @value.setter
+    def value_setter(self, value):
+        self._attached.setter(value)
+    
+    def detach(self):
+        self._attached.detach()
 
-    def setter(self, ref, value):
-        self._accessor.write(self._offset, self._mtype.format, value)
-
-    def detach(self, ref):
-        return self.getter(ref)
-
-
-def reference(mtype, offset, accessor):
-    attached = mtype.attach(offset, accessor)
-    class Ref:
-        value = property(attached.getter, attached.setter)
-        detach = attached.detach
-    return Ref()
 
 
 char = mtype('char', 'c')
