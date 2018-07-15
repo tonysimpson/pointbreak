@@ -1,17 +1,7 @@
 import struct
 import pointbreak
 import pointbreak.types as types
-
-
-class Accessor:
-    def __init__(self, value):
-        self.bytes = bytearray(value)
-
-    def read(self, offset, format):
-        return struct.unpack_from(format, self.bytes, offset)[0]
-
-    def write(self, offset, format, value):
-        struct.pack_into(format, self.bytes, offset, value)
+from pointbreak.types import TestAccessor as Accessor
 
 
 def test_type_get_simple_value():
@@ -26,6 +16,11 @@ def test_type_set_simple_value():
     ref.value = 22
     assert ref.value == 22
 
+def test_type_get_array_value_unchecked():
+    accessor = Accessor(b"\x01\x02\x03")
+    uint8_array_unchecked = types.array_type(0, types.uint8, checked=False)
+    ref = types.reference(uint8_array_unchecked, 0, accessor)
+    assert ref.value[2] == 3
 
 def test_type_get_array_value():
     accessor = Accessor(b"\x01\x02\x03")
@@ -66,4 +61,30 @@ def test_array_detach():
     uint8_array_5 = types.array_type(5, types.uint8)
     ref = types.reference(uint8_array_5, 0, accessor)
     assert ref.detach() == [0, 1, 0, 5, 0]
+
+def test_pointer_get():
+    accessor = Accessor(b"\x08" + (b'\x00' * 7) + b'\x10')
+    uint8_pointer = types.pointer_type(types.uint8)
+    ref = types.reference(uint8_pointer, 0, accessor)
+    assert ref.value.address == 8
+    assert ref.value.value == 16
+
+def test_struct():
+    accessor = Accessor(b'\x00' * 100)
+    complex_struct = types.struct_type(
+        ('value', types.int64), 
+        ('pvalue', types.pointer_type(types.int64)),
+        ('avalue', types.array_type(12, types.char))
+    )
+    ref = types.reference(complex_struct, 0, accessor)
+    ref.value.pvalue = 64
+    ref.value.pvalue.value = 32432424
+    ref.value.value = 321
+    assert ref.value.pvalue.value == 32432424
+
+def test_c_string():
+    accessor = Accessor(b"bobbins\x00")
+    c_string = types.c_string_type(9)
+    ref = types.reference(c_string, 0, accessor)
+    assert ref.value == "bobbins"
 

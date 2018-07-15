@@ -2,7 +2,7 @@ import sys
 import pointbreak
 
 def test_loading_dynamic_library_and_breaking_on_function():
-    db = pointbreak.create_debugger('python', '-c', 'import itertools', timeout=0.5)
+    db = pointbreak.create_debugger('python', '-c', 'import itertools', timeout=10)
     # Python 2 and 3 use different conventions for module initialisation
     if sys.version_info < (3,):
         bp = db.add_breakpoint('inititertools')

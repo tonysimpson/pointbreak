@@ -1,7 +1,17 @@
 import struct as _struct
 
+class TestAccessor(object):
+    def __init__(self, value):
+        self.bytes = bytearray(value)
 
-class mtype:
+    def read(self, offset, format):
+        return _struct.unpack_from(format, self.bytes, offset)[0]
+
+    def write(self, offset, format, value):
+        _struct.pack_into(format, self.bytes, offset, value) 
+
+
+class mtype(object):
     def __init__(self, name, format):
         self.name = name
         self.format = format
@@ -20,7 +30,7 @@ class mtype:
         return attached_mtype(self, offset, accessor)
 
 
-class attached_mtype:
+class attached_mtype(object):
     def __init__(self, mtype, offset, accessor):
         self._mtype = mtype
         self._offset = offset
@@ -36,10 +46,11 @@ class attached_mtype:
         return self.getter()
 
 
-class array_type:
-    def __init__(self, length, contained_type):
+class array_type(object):
+    def __init__(self, length, contained_type, checked=True):
         self.length = length
         self.contained_type = contained_type
+        self.checked = checked
 
     @property
     def alignment(self):
@@ -53,7 +64,7 @@ class array_type:
         return attached_array(self, offset, accessor)
 
 
-class attached_array:
+class attached_array(object):
     def __init__(self, array_type, offset, accessor):
         self._array_type = array_type
         self._offset = offset
@@ -63,14 +74,16 @@ class attached_array:
         return self._array_type.length
 
     def __getitem__(self, index):
-        if 0 > index >= len(self):
-            raise IndexError('Index error for attached_array')
+        if self._array_type.checked:
+            if index < 0 or index >= len(self):
+                raise IndexError('Index error for attached_array')
         offset = self._offset + (index * self._array_type.contained_type.size)
         return self._array_type.contained_type.attach(offset, self._accessor).getter()
 
     def __setitem__(self, index, value):
-        if 0 > index >= len(self):
-            raise IndexError('Index error for attached_array')
+        if self._array_type.checked:
+            if index < 0 or index >= len(self):
+                raise IndexError('Index error for attached_array')
         offset = self._offset + (index * self._array_type.contained_type.size)
         return self._array_type.contained_type.attach(offset, self._accessor).setter(value)
 
@@ -93,32 +106,180 @@ class attached_array:
         return results
 
 
-class struct:
+class struct_type(object):
     def __init__(self, *fields):
-        pass
+        self.fields = fields
+        size = 0
+        for name, mtype in fields:
+            size += size % mtype.alignment
+            size += mtype.size
+        self._size = size
+        self._alignment = self.fields[0][1].alignment
+
+    @property
+    def alignment(self):
+        return self._alignment
+
+    @property
+    def size(self):
+        return self._size
+
+    def attach(self, offset, accessor):
+        return attached_struct(self, offset, accessor)
 
 
-class union:
-    def __init__(self, *fields):
-        pass
+class Struct(object):
+    def __init__(self, fields):
+        self.__dict__.update(fields)
 
 
-class field:
-    def __init__(self, mtype):
-        pass
+class attached_struct(object):
+    def __init__(self, struct_type, offset, accessor):
+        self.__dict__['_struct_type'] = struct_type
+        self.__dict__['_offset'] = offset
+        self.__dict__['_accessor'] = accessor
+        self.__dict__['_attached_fields'] = {}
+        struct_offset = 0
+        for name, value in struct_type.fields:
+            struct_offset += struct_offset % value.alignment
+            self._attached_fields[name] = value.attach(offset + struct_offset, accessor)
+            struct_offset += value.size
+
+    def __repr__(self):
+        return "attached_struct(struct_type={!r}, offset={!r}, accessor={!r})".format(
+            self._struct_type,
+            self._offset,
+            self._accessor,
+            self._attached_fields
+        )
+
+    def __dir__(self):
+        return [name for name in self._attached_fields]
+
+    def __getattr__(self, name):
+        return self._attached_fields[name].getter()
+
+    def __setattr__(self, name, value):
+        self._attached_fields[name].setter(value)
+    
+    def getter(self):
+        return self
+
+    def setter(self, value):
+        for attr in dir(self):
+            if hasattr(value, attr):
+                setattr(self, attr, getattr(value, attr))
+
+    def detach(self):
+        return Struct({name: self._attached_fields[name].detach() for name in dir(self)})
 
 
-class null_term_string:
-    def __init__(self):
-        pass
+class pointer_type(object):
+    def __init__(self, referenced_type):
+        self.referenced_type = referenced_type
+        self._size = _struct.calcsize('P')
+        self._alignment = self._size
+
+    @property
+    def alignment(self):
+        return self._alignment
+
+    @property
+    def size(self):
+        return self._size
+
+    def attach(self, offset, accessor):
+        return attached_pointer(self, offset, accessor)
 
 
-class variable_sized_array:
-    def __init__(self, size_type, contained_type):
-        pass
+class AttachedPointer(object):
+    def __init__(self, address, attached_value):
+        self.address = address
+        self._attached_value = attached_value
+
+    @property
+    def value(self):
+        return self._attached_value.getter()
+
+    @value.setter
+    def value(self, value):
+        self._attached_value.setter(value)
 
 
-class reference:
+class Pointer(object):
+    def __init__(self, address, value):
+        self.address = address
+        self.value = value
+
+
+class attached_pointer(object):
+    def __init__(self, pointer_type, offset, accessor):
+        self._pointer_type = pointer_type
+        self._offset = offset
+        self._accessor = accessor
+
+    def getter(self):
+        address = self._accessor.read(self._offset, 'P')
+        attached = self._pointer_type.referenced_type.attach(address, self._accessor)
+        return AttachedPointer(address, attached)
+
+    def setter(self, value):
+        self._accessor.write(self._offset, 'P', value)
+
+    def detach(self):
+        address = self._accessor.read(self._offset, 'P')
+        if address == 0:
+            return Pointer(address, None)
+        attached = self._pointer_type.referenced_type.attach(address, self._accessor)
+        return Pointer(address, attached.detach())
+
+
+class c_string_type(object):
+    def __init__(self, known_size):
+        self._size = known_size
+    
+    @property
+    def alignment(self):
+        return 1
+
+    @property
+    def size(self):
+        return self._size
+
+    def attach(self, offset, accessor):
+        return attached_c_string(self, offset, accessor)
+
+
+class attached_c_string(object):
+    def __init__(self, c_string_type, offset, accessor):
+        self._c_string_type = c_string_type
+        self._offset = offset
+        self._accessor = accessor
+    
+    def getter(self):
+        buffer = []
+        offset = self._offset
+        while True:
+            c = self._accessor.read(offset, 'c')
+            offset += 1
+            if c == b'\x00':
+                return b''.join(buffer)
+            buffer.append(c)
+
+    def setter(self, value):
+        offset = self._offset
+        strlen = min(len(value), self._c_string_type.size - 1)
+        if strlen <= 0:
+            return
+        for i in range(strlen):
+            self._accessor.write(self._offset + i, 'c', value[i])
+        self._accessor.write(self._offset + strlen, 'b', 0)
+
+    def detach(self):
+        return self.getter()
+
+
+class reference(object):
     def __init__(self, mtype, offset, accessor):
         self._attached = mtype.attach(offset, accessor)
 
@@ -127,7 +288,7 @@ class reference:
         return self._attached.getter()
     
     @value.setter
-    def value_setter(self, value):
+    def value(self, value):
         self._attached.setter(value)
     
     def detach(self):
