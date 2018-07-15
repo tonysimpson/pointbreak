@@ -4,10 +4,16 @@ class TestAccessor(object):
     def __init__(self, value):
         self.bytes = bytearray(value)
 
-    def read(self, offset, format):
-        return _struct.unpack_from(format, self.bytes, offset)[0]
+    def read(self, offset, size):
+        return self.bytes[offset:offset+size]
 
-    def write(self, offset, format, value):
+    def write(self, offset, bytes_to_write):
+        self.bytes[offset:offset+len(bytes_to_write)] = bytes_to_write
+
+    def read_fmt(self, offset, format):
+        return _struct.unpack_from(format, self.bytes, offset)
+
+    def write_fmt(self, offset, format, value):
         _struct.pack_into(format, self.bytes, offset, value) 
 
 
@@ -37,10 +43,10 @@ class attached_mtype(object):
         self._accessor = accessor
 
     def getter(self):
-        return self._accessor.read(self._offset, self._mtype.format)
+        return self._accessor.read_fmt(self._offset, self._mtype.format)[0]
 
     def setter(self, value):
-        self._accessor.write(self._offset, self._mtype.format, value)
+        self._accessor.write_fmt(self._offset, self._mtype.format, value)
 
     def detach(self):
         return self.getter()
@@ -219,17 +225,19 @@ class attached_pointer(object):
         self._accessor = accessor
 
     def getter(self):
-        address = self._accessor.read(self._offset, 'P')
+        address, = self._accessor.read_fmt(self._offset, 'P')
+        if address == 0:
+            return None
         attached = self._pointer_type.referenced_type.attach(address, self._accessor)
         return AttachedPointer(address, attached)
 
     def setter(self, value):
-        self._accessor.write(self._offset, 'P', value)
+        self._accessor.write_fmt(self._offset, 'P', value)
 
     def detach(self):
-        address = self._accessor.read(self._offset, 'P')
+        address, = self._accessor.read_fmt(self._offset, 'P')
         if address == 0:
-            return Pointer(address, None)
+            return None
         attached = self._pointer_type.referenced_type.attach(address, self._accessor)
         return Pointer(address, attached.detach())
 
@@ -260,7 +268,7 @@ class attached_c_string(object):
         buffer = []
         offset = self._offset
         while True:
-            c = self._accessor.read(offset, 'c')
+            c, = self._accessor.read_fmt(offset, 'c')
             offset += 1
             if c == b'\x00':
                 return b''.join(buffer)
@@ -272,8 +280,8 @@ class attached_c_string(object):
         if strlen <= 0:
             return
         for i in range(strlen):
-            self._accessor.write(self._offset + i, 'c', value[i])
-        self._accessor.write(self._offset + strlen, 'b', 0)
+            self._accessor.write_fmt(self._offset + i, 'c', value[i])
+        self._accessor.write_fmt(self._offset + strlen, 'b', 0)
 
     def detach(self):
         return self.getter()
@@ -294,7 +302,8 @@ class reference(object):
     def detach(self):
         return self._attached.detach()
 
-
+c_string = c_string_type(0)
+ptr_c_string = pointer_type(c_string)
 char = mtype('char', 'c')
 int64 = mtype('int64', 'q')
 uint64 = mtype('uint64', 'Q')

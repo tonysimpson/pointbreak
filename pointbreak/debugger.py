@@ -14,6 +14,9 @@ from elftools.dwarf.descriptions import describe_form_class
 import ctypes
 import numbers
 
+from .r_debug import r_debug
+from . import types
+
 # XXX work around for long file support
 # Man pages seem to be vague/wrong about off64_t being signed
 # https://bugs.python.org/issue12545
@@ -250,7 +253,7 @@ class Trap:
 
     def trigger(self, debugger):
         if self.is_user_inserted():
-            debugger._write(self.address, self.original_bytes)
+            debugger.write(self.address, self.original_bytes)
             debugger.registers.rip = self.address
         for breakpoint in list(self.breakpoints):
             if not breakpoint.callback(debugger):
@@ -263,7 +266,7 @@ class Trap:
         if self.is_user_inserted():
             debugger._single_step()
             debugger._wait()
-            debugger._write(self.address, b'\xcc')
+            debugger.write(self.address, b'\xcc')
 
 
 class Breakpoint:
@@ -302,91 +305,6 @@ class Breakpoint:
         return "Breakpoint(value={!r}, callback={!r}, secret={!r})".format(self.value, self.callback, self.secret)
 
 
-class link_map:
-    """linked list of loaded dynamic libraries see glibc/elf/link.h"""
-    def __init__(self, debugger, address):
-        self._debugger = debugger
-        self._address = address
-
-    @property
-    def l_addr(self):
-        """Difference between the address in the ELF file and the addresses in memory."""
-        return self._debugger.read_fmt(self._address, 'Q')[0]
-
-    @property
-    def l_name(self):
-        """Absolute file name object was found in."""
-        address, = self._debugger.read_fmt(self._address + struct.calcsize('Q'), 'Q')
-        return self._debugger.read_string(address)
-    
-    @property
-    def l_ld(self):
-        """Dynamic section of the shared object."""
-        return self._debugger.read_fmt(self._address + struct.calcsize('QQ'), 'Q')[0]
-
-    @property
-    def l_next(self):
-        """Next link_map in chain or None"""
-        address = self._debugger.read_fmt(self._address + struct.calcsize('QQQ'), 'Q')[0]
-        if address == 0:
-            return None
-        return link_map(self._debugger, address)
-
-    @property
-    def l_prev(self):
-        """Previous link_map in chair or None"""
-        address = self._debugger.read_fmt(self._address + struct.calcsize('QQQQ'), 'Q')[0]
-        if address == 0:
-            return None
-        return link_map(self._debugger, address)
-
-
-class r_debug:
-    """Read the r_debug structure from program memory.
-
-    r_debug is defined in glibc/elf/link.h
-    We get the address of this structure from the programs .dynamic section in the DT_DEBUG tag
-    """
-    # XXX NOTE alignment has been added in manually (8 byte aligned) 
-    # this is dumb should probably use ctypes struct instead and some other abstraction
-    def __init__(self, debugger, address):
-        self._debugger = debugger
-        self._address = address
-
-    @property
-    def r_version(self):
-        """Version number for this protocol."""
-        return self._debugger.read_fmt(self._address, 'i')[0]
-
-    @property
-    def r_map(self):
-        """head of link_map linked list"""
-        address = self._debugger.read_fmt(self._address + struct.calcsize('ii'), 'Q')[0]
-        if address == 0:
-            return None
-        return link_map(self._debugger, address)
-
-    @property
-    def r_brk(self):
-        """This is the address of a function internal to the run-time linker,
-            that will always be called when the linker begins to map in a
-            library or unmap it, and again when the mapping change is complete.
-            The debugger can set a breakpoint at this address if it wants to
-            notice shared object mapping changes
-        """
-        return self._debugger.read_fmt(self._address + struct.calcsize('iiQ'), 'Q')[0]
-
-    @property
-    def r_state(self):
-        """This state value describes the mapping change taking place when the `r_brk' address is called."""
-        return self._debugger.read_fmt(self._address + struct.calcsize('iiQQ'), 'i')[0]
-    
-    @property
-    def r_ldbase(self):
-        """Base address the linker is loaded at."""
-        return self._debugger.read_fmt(self._address + struct.calcsize('iiQQii'), 'Q')[0]
-
-
 class Debugger:
     def __init__(self, pid, path, timeout=None):
         self._pid = pid
@@ -404,11 +322,11 @@ class Debugger:
         self._register_names = set(field[0] for field in self._get_registers()._fields_)
 
     def _update_dso(self):
-        s = self._r_debug.r_map
-        while s:
-            if s.l_name:
-                self._symbols.load_dso(self, s.l_name, s.l_addr)
-            s = s.l_next
+        map_ptr = self._r_debug.r_map
+        while map_ptr:
+            if map_ptr.value.l_name:
+                self._symbols.load_dso(self, map_ptr.value.l_name.value.decode('utf8'),  map_ptr.value.l_addr)
+            map_ptr = map_ptr.value.l_next
         return True
 
     def _init_r_debug(self):
@@ -423,7 +341,7 @@ class Debugger:
             if tag == ENUM_D_TAG['DT_DEBUG']:
                 if value == 0:
                     raise PointBreakException('DT_DEBUG value is NULL')
-                self._r_debug = r_debug(self, value)
+                self._r_debug = self.reference(value, r_debug).value
                 self.add_breakpoint(self._r_debug.r_brk, Debugger._update_dso, immediately=True, secret=True)
                 return
             elif tag == ENUM_D_TAG['DT_NULL']:
@@ -504,9 +422,9 @@ class Debugger:
         if address in self._address_to_trap:
             self._address_to_trap[address].add_breakpoint(breakpoint)
         else:
-            original_bytes = self._read(address, 1)
+            original_bytes = self.read(address, 1)
             if original_bytes != b'\xcc':
-                self._write(address, b'\xcc')
+                self.write(address, b'\xcc')
             else:
                 original_bytes = None
             trap = Trap(address, original_bytes)
@@ -573,18 +491,18 @@ class Debugger:
         for mapping in _maps(self._pid):
             yield mapping
 
-    def _read(self, offset, byte_len):
+    def read(self, offset, byte_len):
         self._seek(offset)
         b = os.read(self._mem_fd, byte_len)
         if len(b) != byte_len:
             raise PointBreakException("Incomplete read: read %d wanted %d" % (len(b), byte_len))
         return b
 
-    def _write(self, offset, bytes_to_write):
+    def write(self, offset, bytes_towrite):
         self._seek(offset)
-        num_written = os.write(self._mem_fd, bytes_to_write)
-        if num_written != len(bytes_to_write):
-            raise PointBreakException("Incomplete write: wrote %d wanted %d" % (num_written, len(bytes_to_write)))
+        num_written = os.write(self._mem_fd, bytes_towrite)
+        if num_written != len(bytes_towrite):
+            raise PointBreakException("Incomplete write: wrote %d wanted %d" % (num_written, len(bytes_towrite)))
   
     def _seek(self, offset):
         if offset <= 9223372036854775807: # MAX_LONG
@@ -593,22 +511,18 @@ class Debugger:
             return lseek64(self._mem_fd, offset, os.SEEK_SET)
 
     def read_string(self, offset):
-        buffer = []
-        self._seek(offset)
-        while True:
-            b = os.read(self._mem_fd, 1)
-            if b == b'\x00':
-                break
-            buffer.append(b)
-        return b''.join(buffer).decode('utf8')
+        return self.reference(offset, types.c_string).value.decode('utf8')
 
     def read_fmt(self, offset, fmt):
         size = struct.calcsize(fmt)
-        b = self._read(offset, size)
+        b = self.read(offset, size)
         return struct.unpack(fmt, b)
 
     def write_fmt(self, offset, fmt, *values):
-        self._write(offset, struct.pack(fmt, *values))
+        self.write(offset, struct.pack(fmt, *values))
+
+    def reference(self, offset, mtype):
+        return types.reference(mtype, offset, self)
 
     def kill(self):
         if not self._dead:
