@@ -303,7 +303,7 @@ class reference(object):
         return self._attached.detach()
 
 c_string = c_string_type(0)
-ptr_c_string = pointer_type(c_string)
+c_string_pointer = pointer_type(c_string)
 char = mtype('char', 'c')
 int64 = mtype('int64', 'q')
 uint64 = mtype('uint64', 'Q')
