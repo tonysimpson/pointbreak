@@ -548,7 +548,7 @@ class Debugger:
 
     def __next__(self):
         if self._dead:
-            return StopIteration()
+            raise StopIteration()
         return self.next_event()
     
     next = __next__
