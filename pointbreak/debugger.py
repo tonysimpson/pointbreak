@@ -320,6 +320,7 @@ class Debugger:
         self._r_debug = None
         self.add_breakpoint('main', Debugger._init_r_debug, immediately=True, secret=True)
         self._register_names = set(field[0] for field in self._get_registers()._fields_)
+        self._cont_signal = 0
 
     def _update_dso(self):
         map_ptr = self._r_debug.r_map
@@ -382,6 +383,7 @@ class Debugger:
             if sig == signal.SIGTRAP:
                 event = self._do_trap_event()
             else:
+                self._cont_signal = sig
                 event = Event(EVENT_NAME_STOPPED, signal=sig)
         elif os.WIFEXITED(status):
             self._dead = True
@@ -458,7 +460,8 @@ class Debugger:
         pyptrace.singlestep(self._pid)
 
     def _cont(self):
-        pyptrace.cont(self._pid)
+        pyptrace.cont(self._pid, self._cont_signal)
+        self._cont_signal = 0
 
     def _get_registers(self):
         return pyptrace.getregs(self._pid)[1]
@@ -493,14 +496,20 @@ class Debugger:
 
     def read(self, offset, byte_len):
         self._seek(offset)
-        b = os.read(self._mem_fd, byte_len)
+        try:
+            b = os.read(self._mem_fd, byte_len)
+        except OSError as e:
+            raise PointBreakException('Can not read from {} reason: {}'.format(offset, e))
         if len(b) != byte_len:
             raise PointBreakException("Incomplete read: read %d wanted %d" % (len(b), byte_len))
         return b
 
     def write(self, offset, bytes_towrite):
         self._seek(offset)
-        num_written = os.write(self._mem_fd, bytes_towrite)
+        try:
+            num_written = os.write(self._mem_fd, bytes_towrite)
+        except OSError as e:
+            raise PointBreakException('Can not write to {} reason: {}'.format(offset, e))
         if num_written != len(bytes_towrite):
             raise PointBreakException("Incomplete write: wrote %d wanted %d" % (num_written, len(bytes_towrite)))
   

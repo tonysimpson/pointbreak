@@ -17,6 +17,16 @@ class TestAccessor(object):
         _struct.pack_into(format, self.bytes, offset, value) 
 
 
+class Invalid:
+    __slots__ = ('attached',)
+
+    def __init__(self, attached):
+        self.attached = attached
+
+    def __repr__(self):
+        return 'Invalid(attached={!r})'.format(self.attached)
+
+
 class mtype(object):
     def __init__(self, name, format):
         self.name = name
@@ -49,7 +59,10 @@ class attached_mtype(object):
         self._accessor.write_fmt(self._offset, self._mtype.format, value)
 
     def detach(self):
-        return self.getter()
+        try:
+            return self.getter()
+        except:
+            return Invalid(self)
 
 
 class array_type(object):
@@ -136,7 +149,11 @@ class struct_type(object):
 
 class Struct(object):
     def __init__(self, fields):
+        self._fields = fields
         self.__dict__.update(fields)
+
+    def __repr__(self):
+        return 'Struct({})'.format(', '.join('{}={!r}'.format(name, value) for name, value in self._fields.items()))
 
 
 class attached_struct(object):
@@ -177,7 +194,10 @@ class attached_struct(object):
                 setattr(self, attr, getattr(value, attr))
 
     def detach(self):
-        return Struct({name: self._attached_fields[name].detach() for name in dir(self)})
+        detached_fields = {}
+        for name in dir(self):
+            detached_fields[name] = self._attached_fields[name].detach()
+        return Struct(detached_fields)
 
 
 class pointer_type(object):
@@ -217,6 +237,9 @@ class Pointer(object):
         self.address = address
         self.value = value
 
+    def __repr__(self):
+        return "Pointer(address={!r}, value={!r})".format(self.address, self.value)
+
 
 class attached_pointer(object):
     def __init__(self, pointer_type, offset, accessor):
@@ -235,7 +258,10 @@ class attached_pointer(object):
         self._accessor.write_fmt(self._offset, 'P', value)
 
     def detach(self):
-        address, = self._accessor.read_fmt(self._offset, 'P')
+        try:
+            address, = self._accessor.read_fmt(self._offset, 'P')
+        except:
+            return Invalid(self)
         if address == 0:
             return None
         attached = self._pointer_type.referenced_type.attach(address, self._accessor)
@@ -284,7 +310,10 @@ class attached_c_string(object):
         self._accessor.write_fmt(self._offset + strlen, 'b', 0)
 
     def detach(self):
-        return self.getter()
+        try:
+            return self.getter()
+        except:
+            return Invalid(self)
 
 
 class reference(object):
