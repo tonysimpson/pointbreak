@@ -86,5 +86,5 @@ def test_c_string():
     accessor = Accessor(b"bobbins\x00")
     c_string = types.c_string_type(9)
     ref = types.reference(c_string, 0, accessor)
-    assert ref.value == "bobbins"
+    assert ref.value == b"bobbins"
 

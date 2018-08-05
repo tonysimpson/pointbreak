@@ -3,6 +3,14 @@ import setuptools
 with open("README.md", "r") as fh:
     long_description = fh.read()
 
+ptraceunwind_extension = setuptools.Extension(
+    'pointbreak.ptraceunwind',	
+    sources=['pointbreak/ptraceunwind.c'],
+    libraries=['unwind-generic', 'unwind-ptrace'],
+    #extra_compile_args=['-g', '-fno-omit-frame-pointer', '-O0'], # used for performance/debug
+)
+
+
 setuptools.setup(
     name="pointbreak",
     version="0.0.2",
@@ -15,6 +23,7 @@ setuptools.setup(
     install_requires=["distorm3", "pyptrace", "pyelftools"],
     setup_requires=['pytest-runner'],
     tests_require=['pytest'],
+    ext_modules=[ptraceunwind_extension],
     packages=setuptools.find_packages(),
     classifiers=(
         "Programming Language :: Python :: 2.7",

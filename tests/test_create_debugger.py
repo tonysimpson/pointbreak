@@ -2,7 +2,7 @@ import pointbreak
 
 
 def test_create_debug_cat():
-    db = pointbreak.create_debugger('cat', '/deb/null')
+    db = pointbreak.create_debugger('cat', '/dev/null')
     event = db.next_event()
     assert event.name == pointbreak.EVENT_NAME_EXITED
 
