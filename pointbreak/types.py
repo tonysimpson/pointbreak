@@ -1,5 +1,6 @@
 import struct as _struct
 
+
 class TestAccessor(object):
     def __init__(self, value):
         self.bytes = bytearray(value)
@@ -81,6 +82,33 @@ class array_type(object):
 
     def attach(self, offset, accessor):
         return attached_array(self, offset, accessor)
+
+
+class offset(object):
+    def __init__(self):
+        self.alignment = 1
+        self.size = 1
+
+    def attach(self, offset, accessor):
+        return attached_offset(offset, accessor)
+
+
+class attached_offset(object):
+    def __init__(self, offset, accessor):
+        self.offset = offset
+        self.accessor = accessor
+
+    def read(self, size):
+        return self.accessor.read(self.offset, size)
+
+    def getter(self):
+        return self
+
+    def setter(self, value):
+        raise Exception("Can not set offset")
+
+    def detach(self):
+        raise Exception("Can not detach offset")
 
 
 class attached_array(object):

@@ -14,9 +14,14 @@ class Tracer:
         if address in self._name_cache:
             name = self._name_cache[address]
         else:
-            name = db._symbols.address_to_symbols(address)[0].name
+            try:
+                name = list(db._symbols.address_to_symbols(address))[0].data.name
+            except:
+                name = 'Unknown'
             self._name_cache[address] = name
-        print("{}{}".format(" " * self.depth, name))
+        if len(db.backtrace()) == 2:
+            print(name)
+#            print("{}{}{}".format(" " * self.depth, name, db.backtrace()))
         self.depth += 1
         def trace_exit(db):
             self.depth -= 1

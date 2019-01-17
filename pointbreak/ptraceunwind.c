@@ -58,6 +58,22 @@ Frame_get_reg(Frame *self, PyObject *args) {
 
 
 static PyObject*
+Frame_set_reg(Frame *self, PyObject *args) {
+    unw_word_t value;
+    int reg;
+    int error;
+    if(!PyArg_ParseTuple(args, "iK", &reg, &value)) {
+        return NULL;
+    }
+    if((error = unw_set_reg(&self->cursor, reg, value)) != 0) {
+        PyErr_SetString(PyExc_Exception, libunwind_error_to_string(error));
+		return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+
+static PyObject*
 Frame_get_parent(Frame *self, PyObject *args)
 {
     int error_no;
@@ -88,6 +104,7 @@ Frame_dealloc(Frame* self, PyObject *args)
 static PyMethodDef Frame_methods[] = {
     {"get_parent", (PyCFunction)Frame_get_parent, METH_NOARGS, "Get frame parent, the outer frame."},
     {"get_reg", (PyCFunction)Frame_get_reg, METH_VARARGS, "Get frame register value."},
+    {"set_reg", (PyCFunction)Frame_set_reg, METH_VARARGS, "Set frame register value."},
     {NULL, NULL, 0, NULL}
 };
 
@@ -295,7 +312,7 @@ void initptraceunwind(void)
         REG_CONST(R13);
         REG_CONST(R14);
         REG_CONST(R15);
-        PyModule_AddIntConstant(m, "RIP", UNW_REG_IP);
+        REG_CONST(RIP);
         Py_INCREF(&UnwinderType);
         PyModule_AddObject(m, "Unwinder", (PyObject *)&UnwinderType);
         Py_INCREF(&FrameType);

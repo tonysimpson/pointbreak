@@ -1,2 +1,2 @@
 ghost: ghost.c
-	gcc ghost.c -o ghost
+	gcc ghost.c -g -o ghost

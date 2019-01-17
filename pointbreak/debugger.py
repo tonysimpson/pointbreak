@@ -1,12 +1,12 @@
-from __future__ import print_function
+from __future__ import print_function, absolute_import
 import os
 import sys
 import signal
 import struct
 import time
 import re
-import pyptrace
 import distorm3
+import intervaltree
 from collections import namedtuple
 from elftools.elf.elffile import ELFFile
 from elftools.elf.enums import ENUM_D_TAG
@@ -14,8 +14,11 @@ from elftools.dwarf.descriptions import describe_form_class
 import ctypes
 import numbers
 
+from . import ptrace
+from . import ptraceunwind
 from .r_debug import r_debug
 from . import types
+
 
 # XXX work around for long file support
 # Man pages seem to be vague/wrong about off64_t being signed
@@ -119,11 +122,14 @@ def extract_symbols(pathname, load_address, use_vaddr=True):
 class Symbols:
     def __init__(self):
         self.symbols = []
+        self.tree = intervaltree.IntervalTree()
         self.seen_dso = set()
 
     def _load(self, debugger, pathname, load_address, use_vaddr=True):
         for symbol in extract_symbols(pathname, load_address, use_vaddr):
             self.symbols.append(symbol)
+            if symbol.low_addr < symbol.high_addr:
+                self.tree.addi(symbol.low_addr, symbol.high_addr, symbol)
             if symbol.is_code and symbol.name is not None and symbol.low_addr != 0:
                 debugger._new_symbol(symbol)
 
@@ -142,7 +148,14 @@ class Symbols:
                 yield symbol
 
     def address_to_symbols(self, address):
-        return [sym for sym in self.symbols if sym.low_addr <= address < sym.high_addr]
+        return self.tree[address]
+
+    def address_to_description(self, address):
+        symbols = self.address_to_symbols(address)
+        if symbols:
+            return ', '.join('{}'.format(i.data.name) for i in symbols)
+        else:
+            return '????@0x{:X}'.format(address)
 
 
 EVENT_NAME_STOPPED = "STOP"
@@ -169,28 +182,6 @@ class Event:
         return "Event(name=%r, **%r)" % (self.name, self._attrs)
 
 
-class Registers:
-    def __init__(self, debugger):
-        self.__dict__['_register_names'] = debugger._register_names
-        self.__dict__['_gr'] = debugger._get_registers
-        self.__dict__['_sr'] = debugger._set_registers
-
-    def __dir__(self):
-        return [field for field in self._register_names]
-
-    def __getattr__(self, name):
-        return getattr(self._gr(), name)
-
-    def __setattr__(self, name, value):
-        regs = self._gr()
-        setattr(regs, name, value)
-        self._sr(regs)
-    
-    def __repr__(self):
-        regs = self._gr()
-        return "Registers({})".format(', '.join(["{}=0x{:X}".format(field, getattr(regs, field)) for field in self._register_names]))
-
-
 def _all_not_none(*args):
     return all(i is not None for i in args)
 
@@ -208,39 +199,38 @@ def _slice_range(slice):
 
 
 class Stack:
-    def __init__(self, debugger):
+    def __init__(self, debugger, stack_pointer):
         self._d = debugger
+        self.stack_pointer = stack_pointer
 
     def __getitem__(self, key):
-        rsp = self._d.registers.rsp
         if isinstance(key, slice):
             result = []
             for i in _slice_range(key):
-                location = rsp + (i * 8)
+                location = self.stack_pointer + (i * 8)
                 result.append(self._d.read_fmt(location, 'Q')[0])
             return result
-        location = rsp + (key * 8)
+        location = self.stack_pointer + (key * 8)
         return self._d.read_fmt(location, 'Q')[0]
 
     def __setitem__(self, key, value):
-        rsp = self._d.registers.rsp
         if isinstance(key, slice):
             for i, v in zip(_slice_range(key), value):
-                location = rsp + (i * 8)
+                location = self.stack_pointer + (i * 8)
                 self._d.write_fmt(location, 'Q', v)                
         else:
-            location = rsp + (key * 8)
+            location = self.stack_pointer + (key * 8)
             self._d.write_fmt(location, 'Q', value)
 
     def __repr__(self):
-        return "Stack(rsp=0x{:X})".format(self._d.registers.rsp)
+        return "Stack(debugger={!r}, stack_pointer=0x{:X})".format(self._d, self.stack_pointer)
 
 
 class Trap:
     def __init__(self, address, original_bytes=None):
         self.address = address
         self.original_bytes = original_bytes
-        self.breakpoints = set()
+        self.breakpoints = []
 
     def is_user_inserted(self):
         return self.original_bytes is not None
@@ -249,15 +239,17 @@ class Trap:
         return len(self.breakpoints) > 0
 
     def add_breakpoint(self, breakpoint):
-        self.breakpoints.add(breakpoint)
+        self.breakpoints.insert(0, breakpoint)
 
     def trigger(self, debugger):
         if self.is_user_inserted():
             debugger.write(self.address, self.original_bytes)
             debugger.registers.rip = self.address
-        for breakpoint in list(self.breakpoints):
-            if not breakpoint.callback(debugger):
-                self.breakpoints.remove(breakpoint)
+        still_active_breakpoints = []
+        for breakpoint in self.breakpoints:
+            if breakpoint.callback(debugger):
+                still_active_breakpoints.append(breakpoint)
+        self.breakpoints = still_active_breakpoints
 
     def get_all_not_secret_breakpoints(self):
         return frozenset(bp for bp in self.breakpoints if not bp.secret)
@@ -305,6 +297,93 @@ class Breakpoint:
         return "Breakpoint(value={!r}, callback={!r}, secret={!r})".format(self.value, self.callback, self.secret)
 
 
+class FrameRegisters:
+    def __init__(self, unwinder_frame):
+        self._unwinder_frame = unwinder_frame
+    
+    for name in dir(ptraceunwind):
+        if name.startswith('R'):
+            _reg = getattr(ptraceunwind, name)
+            def _getter(self, reg=_reg):
+                return self._unwinder_frame.get_reg(reg)
+            def _setter(self, value, reg=_reg):
+                self._unwinder_frame.set_reg(reg)
+            prop_name = name.lower()
+            locals()[prop_name] = property(_getter, _setter, None, '{} register'.format(prop_name))
+
+
+class PTraceRegisters(object):
+    def __init__(self, pid):
+        self._pid = pid
+    
+    for register_name in ptrace.register_names():
+        def _getter(self, attr=register_name):
+            return getattr(ptrace.get_regs(self._pid), attr)
+        def _setter(self, value, attr=register_name):
+            regs = ptrace.get_regs(self._pid)
+            setattr(regs, attr, value)
+            ptrace.set_regs(self._pid, regs)
+        locals()[register_name] = property(_getter, _setter, None, '{} register'.format(register_name))
+
+
+class Frame:
+    def __init__(self, db, unwinder_frame, child=None):
+        self._db = db
+        self.child = child
+        self._parent = False # use False here as lazy load indicator because parent can be None
+        self._registers = None
+        self._unwinder_frame = unwinder_frame
+    
+    @property
+    def parent(self):
+        if self._parent is False:
+            unwinder_frame = self._unwinder_frame.get_parent()
+            if unwinder_frame is None:
+                self._parent = None
+            else:
+                self._parent = Frame(self._db, unwinder_frame, self)
+        return self._parent
+    
+    @property
+    def registers(self):
+        if self._registers is None:
+            self._registers = FrameRegisters(self._unwinder_frame)
+        return self._registers
+
+    @property
+    def function_name(self):
+        return self._db.address_to_description(self.registers.rip)
+
+    @property
+    def stack(self):
+        return Stack(self._db, self.registers.rsp)
+
+    def __repr__(self):
+        return '<Frame {}>'.format(self.function_name)
+
+
+class Statm:
+    def __init__(self, pid):
+        self._filename = '/proc/%d/statm' % (pid,)
+
+    def _read_statm_field(self, index):
+        statm_content = open(self._filename).read()
+        field_str = statm_content.split(' ', index+1)[index]
+        return int(field_str) * 4096
+
+    @property
+    def size(self):
+        return self._read_statm_field(0)
+
+    @property
+    def resident(self):
+        return self._read_statm_field(1)
+
+    @property
+    def share(self):
+        return self._read_statm_field(2)
+
+
 class Debugger:
     def __init__(self, pid, path, timeout=None):
         self._pid = pid
@@ -319,8 +398,10 @@ class Debugger:
         self._symbols.load_program(self, self._path)
         self._r_debug = None
         self.add_breakpoint('main', Debugger._init_r_debug, immediately=True, secret=True)
-        self._register_names = set(field[0] for field in self._get_registers()._fields_)
         self._cont_signal = 0
+        self._unwinder = ptraceunwind.Unwinder(self._pid)
+        self._registers = PTraceRegisters(self._pid)
+        self._statm = Statm(self._pid)
 
     def _update_dso(self):
         map_ptr = self._r_debug.r_map
@@ -443,9 +524,15 @@ class Debugger:
     def _new_breakpoint(self, breakpoint):
         if breakpoint.match(None):
             self._install_trap(None, breakpoint)
-        for symbol in self._symbols.iter_code_symbols():
-            if breakpoint.match(symbol):
-                self._install_trap(symbol, breakpoint)
+        else:
+            addresses = set()
+            for symbol in self._symbols.iter_code_symbols():
+                if breakpoint.match(symbol):
+                    address = breakpoint.address_from_symbol(symbol)
+                    if address not in addresses:
+                        addresses.add(address)
+                        self._install_trap(symbol, breakpoint)
+
 
     def add_breakpoint(self, value, callback=None, immediately=False, secret=False):
         if callback is None:
@@ -457,25 +544,27 @@ class Debugger:
         return breakpoint
 
     def _single_step(self):
-        pyptrace.singlestep(self._pid)
+        ptrace.single_step(self._pid, 0)
 
     def _cont(self):
-        pyptrace.cont(self._pid, self._cont_signal)
+        ptrace.cont(self._pid, self._cont_signal)
         self._cont_signal = 0
-
-    def _get_registers(self):
-        return pyptrace.getregs(self._pid)[1]
-
-    def _set_registers(self, registers):
-        return pyptrace.setregs(self._pid, registers)
 
     @property
     def registers(self):
-        return Registers(self)
+        return self._registers
+
+    @property
+    def statm(self):
+        return self._statm
+
+    @property
+    def frame(self):
+        return Frame(self, self._unwinder.unwind())
 
     @property
     def stack(self):
-        return Stack(self)
+        return Stack(self, self.registers.rsp)
 
     def _wait(self, timeout=None):
         if timeout is None and self._timeout is not None:
@@ -499,7 +588,7 @@ class Debugger:
         try:
             b = os.read(self._mem_fd, byte_len)
         except OSError as e:
-            raise PointBreakException('Can not read from {} reason: {}'.format(offset, e))
+            raise PointBreakException('Can not read from {} len {} reason: {}'.format(offset, byte_len, e))
         if len(b) != byte_len:
             raise PointBreakException("Incomplete read: read %d wanted %d" % (len(b), byte_len))
         return b
@@ -533,14 +622,40 @@ class Debugger:
     def reference(self, offset, mtype):
         return types.reference(mtype, offset, self)
 
+    def signal(self, signal):
+        os.kill(self._pid, signal)
+
+    def wait(self):
+        status = self._wait()
+        return self._do_status_to_event_or_none(status)
+
+    def sigkill(self):
+        return self.signal(signal.SIGKILL)
+
+    def sigstop(self):
+        return self.signal(signal.SIGSTOP)
+
+    def sigcont(self):
+        return self.signal(signal.SIGCONT)
+
     def kill(self):
-        if not self._dead:
-            os.kill(self._pid, signal.SIGKILL)
-            status = self._wait()
-            return self._do_status_to_event_or_none(status)
+        self.sigkill()
+        self.wait()
+
+    def backtrace(self):
+        result = []
+        cur = self.frame
+        while cur is not None:
+            result.insert(0, cur)
+            cur = cur.parent
+        return result
+
+    def address_to_description(self, address):
+        return self._symbols.address_to_description(address)
 
     def __del__(self):
-        self.kill()
+        if not self._dead:
+            self.kill()
 
     def __iter__(self):
         return self
@@ -573,11 +688,11 @@ def create_debugger(executable_path, *args, **kwargs):
     child_pid = os.fork()
     if child_pid == 0:
         # I'm the child
-        pyptrace.traceme() # Enable tracing
+        ptrace.trace_me() # Enable tracing
         os.execv(exec_path, [os.path.basename(exec_path)] + list(args)) # Run the debug target
     else:
         os.waitpid(child_pid, 0)
-        pyptrace.setoptions(child_pid, pyptrace.PTRACE_O_EXITKILL)
+        ptrace.set_exit_kill(child_pid)
         return Debugger(child_pid, exec_path, timeout=timeout)
 
 
