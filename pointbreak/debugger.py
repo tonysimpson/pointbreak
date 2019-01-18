@@ -18,7 +18,7 @@ from . import ptrace
 from . import ptraceunwind
 from .r_debug import r_debug
 from . import types
-
+from . import auxv
 
 # XXX work around for long file support
 # Man pages seem to be vague/wrong about off64_t being signed
@@ -395,9 +395,10 @@ class Debugger:
         self._breakpoints = []
         self._address_to_trap = {}
         self._active_trap = None
-        self._symbols.load_program(self, self._path)
+        
+        program_entry = auxv.auxv_get_entry(self._pid)
         self._r_debug = None
-        self.add_breakpoint('main', Debugger._init_r_debug, immediately=True, secret=True)
+        self.add_breakpoint(program_entry, Debugger._init_r_debug, immediately=True, secret=True)
         self._cont_signal = 0
         self._unwinder = ptraceunwind.Unwinder(self._pid)
         self._registers = PTraceRegisters(self._pid)
@@ -406,8 +407,10 @@ class Debugger:
     def _update_dso(self):
         map_ptr = self._r_debug.r_map
         while map_ptr:
-            if map_ptr.value.l_name:
+            if map_ptr.value.l_name.value:
                 self._symbols.load_dso(self, map_ptr.value.l_name.value.decode('utf8'),  map_ptr.value.l_addr)
+            else:
+                self._symbols.load_dso(self, self._path,  map_ptr.value.l_addr)
             map_ptr = map_ptr.value.l_next
         return True
 
@@ -416,19 +419,23 @@ class Debugger:
         
         See glibc/elf/link.h
         """
+        fmt = 'QQ'
+        fmt_size = struct.calcsize(fmt)
         elf = ELFFile(open(self._path, 'rb'))
-        address = elf.get_section_by_name('.dynamic').header['sh_addr']
+        relocation = auxv.auxv_get_entry(self._pid) - elf.header.e_entry
+        r_debug_address = elf.get_section_by_name('.dynamic').header['sh_addr'] + relocation
         while True:
-            tag, value = self.read_fmt(address, 'QQ')
+            tag, value = self.read_fmt(r_debug_address, fmt)
             if tag == ENUM_D_TAG['DT_DEBUG']:
                 if value == 0:
                     raise PointBreakException('DT_DEBUG value is NULL')
                 self._r_debug = self.reference(value, r_debug).value
                 self.add_breakpoint(self._r_debug.r_brk, Debugger._update_dso, immediately=True, secret=True)
+                self._update_dso()
                 return
             elif tag == ENUM_D_TAG['DT_NULL']:
                 raise PointBreakException('No DT_DEBUG')
-            address += struct.calcsize('QQ')
+            r_debug_address += fmt_size 
 
     def _restore_current_trap_if_needed(self):
         if self._active_trap is not None:
