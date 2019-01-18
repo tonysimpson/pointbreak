@@ -132,9 +132,8 @@ class Symbols:
                 self.tree.addi(symbol.low_addr, symbol.high_addr, symbol)
             if symbol.is_code and symbol.name is not None and symbol.low_addr != 0:
                 debugger._new_symbol(symbol)
-    
-   
-   def load_dso(self, debugger, pathname, load_address):
+
+    def load_dso(self, debugger, pathname, load_address):
         if pathname in self.seen_dso:
             return
         self.seen_dso.add(pathname)
