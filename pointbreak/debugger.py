@@ -93,7 +93,7 @@ class Symbol:
         return "Symbol(low_addr={!r}, high_addr={!r}, name={!r}, obj_file={!r}, src_file={!r}, src_line={!r}, is_code={!r})".format(self.low_addr, self.high_addr, self.name, self.obj_file, self.src_file, self.src_line, self.is_code)
 
 
-def extract_symbols(pathname, load_address, use_vaddr=True):
+def extract_symbols(pathname, load_address, use_vaddr=False):
     try:
         elf = ELFFile(open(pathname, 'rb'))
     except:
@@ -125,18 +125,16 @@ class Symbols:
         self.tree = intervaltree.IntervalTree()
         self.seen_dso = set()
 
-    def _load(self, debugger, pathname, load_address, use_vaddr=True):
+    def _load(self, debugger, pathname, load_address, use_vaddr=False):
         for symbol in extract_symbols(pathname, load_address, use_vaddr):
             self.symbols.append(symbol)
             if symbol.low_addr < symbol.high_addr:
                 self.tree.addi(symbol.low_addr, symbol.high_addr, symbol)
             if symbol.is_code and symbol.name is not None and symbol.low_addr != 0:
                 debugger._new_symbol(symbol)
-
-    def load_program(self, debugger, pathname):
-        self._load(debugger, pathname, 0, use_vaddr=False)
-
-    def load_dso(self, debugger, pathname, load_address):
+    
+   
+   def load_dso(self, debugger, pathname, load_address):
         if pathname in self.seen_dso:
             return
         self.seen_dso.add(pathname)
