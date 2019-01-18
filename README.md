@@ -1,4 +1,5 @@
-# Pointbreak
+[![Build Status](https://travis-ci.com/tonysimpson/pointbreak.svg?branch=master)](https://travis-ci.com/tonysimpson/pointbreak)
+# Pointbreak 
 
 Pointbreak lets you write python programs that debug or analysis other programs. It works like a debugger but because it's a Python library you can extend and interact with it very easily.
 
