@@ -10,7 +10,7 @@ def test_breakpoint_on_main():
     assert event.name == pointbreak.EVENT_NAME_TRAP
     assert bp in event.triggered, "break point should be triggered"
 
-@pytest.mark.skip(reason="We get a STOP Event before the TRAP - need to research why it behaves differently")
+
 def test_existing_breakpoint_in_program():
     db = pointbreak.create_debugger('python', '-c', 'import pointbreak.utils; pointbreak.utils.breakpoint()', timeout=0.5)
     event = db.next_event()
