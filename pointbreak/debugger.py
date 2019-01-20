@@ -242,6 +242,7 @@ class Trap:
         if self.is_user_inserted():
             debugger.write(self.address, self.original_bytes)
             debugger.registers.rip = self.address
+            debugger.save_registers()
         still_active_breakpoints = []
         for breakpoint in self.breakpoints:
             if breakpoint.callback(debugger):
@@ -307,20 +308,6 @@ class FrameRegisters:
                 self._unwinder_frame.set_reg(reg)
             prop_name = name.lower()
             locals()[prop_name] = property(_getter, _setter, None, '{} register'.format(prop_name))
-
-
-class PTraceRegisters(object):
-    def __init__(self, pid):
-        self._pid = pid
-    
-    for register_name in ptrace.register_names():
-        def _getter(self, attr=register_name):
-            return getattr(ptrace.get_regs(self._pid), attr)
-        def _setter(self, value, attr=register_name):
-            regs = ptrace.get_regs(self._pid)
-            setattr(regs, attr, value)
-            ptrace.set_regs(self._pid, regs)
-        locals()[register_name] = property(_getter, _setter, None, '{} register'.format(register_name))
 
 
 class Frame:
@@ -398,7 +385,7 @@ class Debugger:
         self.add_breakpoint(program_entry, Debugger._init_r_debug, immediately=True, secret=True)
         self._cont_signal = 0
         self._unwinder = ptraceunwind.Unwinder(self._pid)
-        self._registers = PTraceRegisters(self._pid)
+        self._registers = None
         self._statm = Statm(self._pid)
 
     def _update_dso(self):
@@ -556,7 +543,12 @@ class Debugger:
 
     @property
     def registers(self):
+        if self._registers is None:
+            self._registers = ptrace.get_regs(self._pid)
         return self._registers
+    
+    def save_registers(self):
+        ptrace.set_regs(self._pid, self._registers)
 
     @property
     def statm(self):
@@ -570,7 +562,9 @@ class Debugger:
     def stack(self):
         return Stack(self, self.registers.rsp)
 
+
     def _wait(self, timeout=None):
+        self._registers = None
         if timeout is None and self._timeout is not None:
             timeout = self._timeout
         if timeout:
@@ -579,7 +573,7 @@ class Debugger:
                 status = os.waitpid(self._pid, os.WNOHANG)
                 if status != (0, 0):
                     return status[1]
-                time.sleep(0.005)
+                time.sleep(0.005) #TODO would be better to use signalfd?
             raise Timeout()
         return os.waitpid(self._pid, 0)[1]
 
