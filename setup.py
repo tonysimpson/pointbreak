@@ -19,7 +19,7 @@ ptrace_extension = setuptools.Extension(
     #extra_compile_args=['-g', '-fno-omit-frame-pointer', '-fno-inline-small-functions', '-O0'], # used for performance/debug
 )
 
-ptrace_extension = setuptools.Extension(
+process_extension = setuptools.Extension(
     'pointbreak.process',	
     sources=['pointbreak/process.c'],
     #extra_compile_args=['-g', '-fno-omit-frame-pointer', '-fno-inline-small-functions', '-O0'], # used for performance/debug
@@ -38,7 +38,7 @@ setuptools.setup(
     install_requires=["distorm3",   "pyelftools", 'intervaltree'],
     setup_requires=['pytest-runner'],
     tests_require=['pytest'],
-    ext_modules=[ptrace_extension, ptraceunwind_extension],
+    ext_modules=[process_extension, ptrace_extension, ptraceunwind_extension],
     packages=setuptools.find_packages(),
     classifiers=(
         "Programming Language :: Python :: 2.7",
