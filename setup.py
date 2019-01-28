@@ -9,14 +9,20 @@ ptraceunwind_extension = setuptools.Extension(
     'pointbreak.ptraceunwind',	
     sources=['pointbreak/ptraceunwind.c'],
     libraries=['unwind-generic', 'unwind-ptrace'],
-    extra_compile_args=['-g', '-fno-omit-frame-pointer', '-fno-inline-small-functions', '-O0'], # used for performance/debug
+    #extra_compile_args=['-g', '-fno-omit-frame-pointer', '-fno-inline-small-functions', '-O0'], # used for performance/debug
 )
 
 
 ptrace_extension = setuptools.Extension(
     'pointbreak.ptrace',	
     sources=['pointbreak/ptrace.c'],
-    extra_compile_args=['-g', '-fno-omit-frame-pointer', '-fno-inline-small-functions', '-O0'], # used for performance/debug
+    #extra_compile_args=['-g', '-fno-omit-frame-pointer', '-fno-inline-small-functions', '-O0'], # used for performance/debug
+)
+
+ptrace_extension = setuptools.Extension(
+    'pointbreak.process',	
+    sources=['pointbreak/process.c'],
+    #extra_compile_args=['-g', '-fno-omit-frame-pointer', '-fno-inline-small-functions', '-O0'], # used for performance/debug
 )
 
 

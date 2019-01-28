@@ -15,6 +15,7 @@ import numbers
 
 from . import ptrace
 from . import ptraceunwind
+from . import process
 from .r_debug import r_debug
 from . import types
 from . import auxv
@@ -82,8 +83,10 @@ class Symbols:
         self.symbols = []
         self.tree = intervaltree.IntervalTree()
         self.seen_dso = set()
+        self._description_cache = {}
 
     def _load(self, debugger, pathname, load_address, use_vaddr=False):
+        self._description_cache = {}
         for symbol in extract_symbols(pathname, load_address, use_vaddr):
             self.symbols.append(symbol)
             if symbol.low_addr < symbol.high_addr:
@@ -106,11 +109,16 @@ class Symbols:
         return self.tree[address]
 
     def address_to_description(self, address):
-        symbols = self.address_to_symbols(address)
-        if symbols:
-            return ', '.join('{}'.format(i.data.name) for i in symbols)
-        else:
-            return '????@0x{:X}'.format(address)
+        try:
+            return self._description_cache[address]
+        except:
+            symbols = self.address_to_symbols(address)
+            if symbols:
+                description = ', '.join('{}'.format(i.data.name) for i in symbols)
+                self._description_cache[address] = description
+                return description
+            else:
+                return '????@0x{:X}'.format(address)
 
 
 EVENT_NAME_STOPPED = "STOP"
@@ -195,6 +203,13 @@ class Trap:
 
     def add_breakpoint(self, breakpoint):
         self.breakpoints.insert(0, breakpoint)
+        breakpoint.traps.append(self)
+
+    def remove_breakpoint(self, breakpoint, debugger):
+        self.breakpoints.remove(breakpoint)
+        if not self.is_active():
+            if self.is_user_inserted():
+                debugger.write(self.address, self.original_bytes)
 
     def trigger(self, debugger):
         if self.is_user_inserted():
@@ -205,6 +220,8 @@ class Trap:
         for breakpoint in self.breakpoints:
             if breakpoint.callback(debugger):
                 still_active_breakpoints.append(breakpoint)
+            else:
+                breakpoint.traps.remove(self)
         self.breakpoints = still_active_breakpoints
 
     def get_all_not_secret_breakpoints(self):
@@ -228,6 +245,7 @@ class Breakpoint:
             self._address = int(value)
         else:
             self._re_pattern = re.compile(value)
+        self.traps = []
 
     def address_from_symbol(self, symbol):
         if self._address is not None:
@@ -482,6 +500,14 @@ class Debugger:
                         addresses.add(address)
                         self._install_trap(symbol, breakpoint)
 
+    def remove_breakpoint(self, breakpoint):
+        if breakpoint in self._breakpoints: # may not be here because it was applied immediately
+            self._breakpoints.remove(breakpoint)
+        for trap in breakpoint.traps:
+            trap.remove_breakpoint(breakpoint, self)
+            if not trap.is_active():
+                del self._address_to_trap[trap.address]
+        breakpoint.traps = []
 
     def add_breakpoint(self, value, callback=None, immediately=False, secret=False):
         if callback is None:
@@ -630,6 +656,10 @@ def create_debugger(executable_path, *args, **kwargs):
     if 'timeout' in kwargs:
         timeout = kwargs['timeout']
         del kwargs['timeout']
+    disable_address_space_randomisation = True
+    if 'disable_address_space_randomisation' in kwargs:
+        disable_address_space_randomisation = kwargs['disable_address_space_randomisation']
+        del kwargs['disable_address_space_randomisation']
     if kwargs:
         raise TypeError('Unexpected keyword arguments {!r}'.format(kwargs))
     if os.path.exists(executable_path): 
@@ -643,6 +673,8 @@ def create_debugger(executable_path, *args, **kwargs):
             raise ExecutableNotFound('Could not find executable %r' % (executable_path,))
     child_pid = os.fork()
     if child_pid == 0:
+        if disable_address_space_randomisation:
+            process.disable_address_space_randomisation()
         # I'm the child
         ptrace.trace_me() # Enable tracing
         os.execv(exec_path, [os.path.basename(exec_path)] + list(args)) # Run the debug target
