@@ -5,6 +5,8 @@ Pointbreak lets you write python programs that debug or analysis other programs.
 
 Pointbreak is designed to make debugging and analysing complex things like JITs simpler without having to added lots of debugging code to the target.
 
+[Europython 2018 lightning talk](https://www.youtube.com/watch?v=czHfx2MVch0)
+
 ## General Advantages
 * Breakpoints are any Python callable
 * Simple API
