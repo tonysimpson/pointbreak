@@ -12,6 +12,7 @@ from elftools.elf.enums import ENUM_D_TAG
 from elftools.dwarf.descriptions import describe_form_class
 import ctypes
 import numbers
+import shlex
 
 from . import ptrace
 from . import ptraceunwind
@@ -345,9 +346,9 @@ class Statm:
 
 
 class Debugger:
-    def __init__(self, pid, path, timeout=None):
+    def __init__(self, pid, timeout=None):
         self._pid = pid
-        self._path = path
+        self._path = '/proc/%d/exe' % (pid,)
         self._timeout = timeout
         self._mem_fd = os.open("/proc/%d/mem" % (pid,), os.O_RDWR)
         self._symbols = Symbols()
@@ -651,37 +652,42 @@ class Debugger:
 
 
 
-def create_debugger(executable_path, *args, **kwargs):
-    timeout = None
-    if 'timeout' in kwargs:
-        timeout = kwargs['timeout']
-        del kwargs['timeout']
-    disable_address_space_randomisation = True
-    if 'disable_address_space_randomisation' in kwargs:
-        disable_address_space_randomisation = kwargs['disable_address_space_randomisation']
-        del kwargs['disable_address_space_randomisation']
-    if kwargs:
-        raise TypeError('Unexpected keyword arguments {!r}'.format(kwargs))
+def create_debugger(command, environment=None, timeout=None, disable_randomisation=True):
+    split_command = shlex.split(command)
+    executable_path, args = split_command[0], split_command[1:]
     if os.path.exists(executable_path): 
         exec_path = executable_path
-    else: # Search the PATH for executable
-        for path_prefix in os.environ['PATH'].split(':'):
+    if environment is not None:
+        env = environment
+    else:
+        env = dict(os.environ)
+    if executable_path.startswith('/') or executable_path.startswith('./'):
+        exec_path = executable_path
+        if not os.path.exists(exec_path):
+            raise ExecutableNotFound('Executable %r does not exist' % (exec_path,))
+    else:
+        paths = env.get('PATH', '').split(':')
+        for path_prefix in paths:
             exec_path = os.path.join(path_prefix, executable_path)
             if os.path.exists(exec_path):
                 break
         else:
-            raise ExecutableNotFound('Could not find executable %r' % (executable_path,))
+            ExecutableNotFound('Could not find executable %r in paths %r' % (executable_path, paths))
+    exec_abs_path = os.path.abspath(exec_path)
+    if not os.path.exists(exec_abs_path):
+        raise ExecutableNotFound("Absolute path %r from path %r does not exist" % (exec_abs_path, exec_path))
     child_pid = os.fork()
     if child_pid == 0:
-        if disable_address_space_randomisation:
-            process.disable_address_space_randomisation()
         # I'm the child
+        if disable_randomisation:
+            process.disable_address_space_randomisation()
         ptrace.trace_me() # Enable tracing
-        os.execv(exec_path, [os.path.basename(exec_path)] + list(args)) # Run the debug target
+        os.path.basename(exec_path)
+        os.execve(exec_abs_path, [exec_abs_path] + args, env) # Run the debug target
     else:
         os.waitpid(child_pid, 0)
         ptrace.set_exit_kill(child_pid)
-        return Debugger(child_pid, exec_path, timeout=timeout)
+        return Debugger(child_pid, timeout=timeout)
 
 
 __ALL__ = ['create_debugger', 'PointBreakException']
