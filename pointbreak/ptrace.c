@@ -57,6 +57,21 @@ static PyObject * ptrace_set_exit_kill(PyObject *self, PyObject *args)
     Py_RETURN_NONE;
 }
 
+
+static PyObject * ptrace_set_trace_exit(PyObject *self, PyObject *args)
+{
+    int pid;
+    if (!PyArg_ParseTuple(args, "i", &pid)) {
+        return NULL;
+    }
+    if (ptrace(PTRACE_SETOPTIONS, pid, 0, PTRACE_O_TRACEEXIT) != 0) {
+        PyErr_SetString(PyExc_Exception, "ptrace_set_trace_exit error");
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+
 typedef struct {
     PyObject_HEAD
     struct user_regs_struct regs;
@@ -196,6 +211,7 @@ static PyMethodDef funcs[] = {
     {"get_regs", ptrace_get_regs, METH_VARARGS, "Get traced process registers"}, 
     {"set_regs", ptrace_set_regs, METH_VARARGS, "Set traced process registers"}, 
     {"register_names", ptrace_register_names, METH_VARARGS, "List architecture register names"}, 
+    {"set_trace_exit", ptrace_set_trace_exit, METH_VARARGS, "Set to get a trace event before tracee exit"},
     {NULL, NULL, 0, NULL}
 };
 

@@ -7,6 +7,7 @@ from .debugger import (
 )
 from .exceptions import (
     PointBreakException,
+    DeadProcess,
     ExecutableNotFound,
     Timeout,
 )

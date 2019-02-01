@@ -13,6 +13,7 @@ from elftools.dwarf.descriptions import describe_form_class
 import ctypes
 import numbers
 import shlex
+from collections import deque
 
 from . import ptrace
 from . import ptraceunwind
@@ -20,7 +21,7 @@ from . import process
 from .r_debug import r_debug
 from . import types
 from . import auxv
-from .exceptions import Timeout, ExecutableNotFound
+from .exceptions import Timeout, ExecutableNotFound, PointBreakException, DeadProcess
 
 # XXX work around for long file support
 # Man pages seem to be vague/wrong about off64_t being signed
@@ -133,9 +134,6 @@ class Event:
         self.name = name
         self._attrs = attrs
 
-    def is_last_event(self):
-        return self.name in (EVENT_NAME_EXITED, EVENT_NAME_TERMINATED)
-
     def __getattr__(self, name):
         try:
             return self._attrs[name]
@@ -191,55 +189,55 @@ class Stack:
 
 
 class Trap:
-    def __init__(self, address, original_bytes=None):
+    def __init__(self, address, original_byte=None):
         self.address = address
-        self.original_bytes = original_bytes
+        self.original_byte = original_byte
         self.breakpoints = []
 
-    def is_user_inserted(self):
-        return self.original_bytes is not None
+    def is_debugger_inserted(self):
+        return self.original_byte is not None
 
     def is_active(self):
         return len(self.breakpoints) > 0
 
     def add_breakpoint(self, breakpoint):
-        self.breakpoints.insert(0, breakpoint)
         breakpoint.traps.append(self)
+        self.breakpoints.insert(0, breakpoint)
 
     def remove_breakpoint(self, breakpoint, debugger):
         self.breakpoints.remove(breakpoint)
+        breakpoint.traps.remove(self)
         if not self.is_active():
-            if self.is_user_inserted():
-                debugger.write(self.address, self.original_bytes)
+            if self.is_debugger_inserted():
+                debugger.write(self.address, self.original_byte)
 
     def trigger(self, debugger):
-        if self.is_user_inserted():
-            debugger.write(self.address, self.original_bytes)
-            debugger.registers.rip = self.address
-            debugger.save_registers()
         still_active_breakpoints = []
-        for breakpoint in self.breakpoints:
+        breakpoints = list(self.breakpoints)
+        for breakpoint in breakpoints:
             if breakpoint.callback(debugger):
                 still_active_breakpoints.append(breakpoint)
             else:
                 breakpoint.traps.remove(self)
         self.breakpoints = still_active_breakpoints
 
-    def get_all_not_secret_breakpoints(self):
-        return frozenset(bp for bp in self.breakpoints if not bp.secret)
-    
-    def step_and_restore(self, debugger):
-        if self.is_user_inserted():
-            debugger._single_step()
-            debugger._wait()
+    def get_all_not_internal_breakpoints(self):
+        return frozenset(bp for bp in self.breakpoints if not bp.internal)
+
+    def remove(self, debugger):
+        if self.is_debugger_inserted():
+            debugger.write(self.address, self.original_byte)
+
+    def restore(self, debugger):
+        if self.is_debugger_inserted():
             debugger.write(self.address, b'\xcc')
 
 
 class Breakpoint:
-    def __init__(self, value, callback, secret=False):
+    def __init__(self, value, callback, internal=False):
         self.value = value
         self.callback = callback
-        self.secret = secret
+        self.internal = internal
         self._re_pattern = None
         self._address = None
         if isinstance(value, numbers.Number):
@@ -269,7 +267,7 @@ class Breakpoint:
         return False
 
     def __repr__(self):
-        return "Breakpoint(value={!r}, callback={!r}, secret={!r})".format(self.value, self.callback, self.secret)
+        return "Breakpoint(value={!r}, callback={!r}, internal={!r})".format(self.value, self.callback, self.internal)
 
 
 class FrameRegisters:
@@ -359,11 +357,12 @@ class Debugger:
         
         program_entry = auxv.auxv_get_entry(self._pid)
         self._r_debug = None
-        self.add_breakpoint(program_entry, Debugger._init_r_debug, immediately=True, secret=True)
+        self.add_breakpoint(program_entry, Debugger._init_r_debug, immediately=True, internal=True)
         self._cont_signal = 0
         self._unwinder = ptraceunwind.Unwinder(self._pid)
         self._registers = None
         self._statm = Statm(self._pid)
+        self._events = deque()
 
     def _update_dso(self):
         map_ptr = self._r_debug.r_map
@@ -391,46 +390,45 @@ class Debugger:
                 if value == 0:
                     raise PointBreakException('DT_DEBUG value is NULL')
                 self._r_debug = self.reference(value, r_debug).value
-                self.add_breakpoint(self._r_debug.r_brk, Debugger._update_dso, immediately=True, secret=True)
+                self.add_breakpoint(self._r_debug.r_brk, Debugger._update_dso, immediately=True, internal=True)
                 self._update_dso()
                 return
             elif tag == ENUM_D_TAG['DT_NULL']:
                 raise PointBreakException('No DT_DEBUG')
             r_debug_address += fmt_size 
 
-    def _restore_current_trap_if_needed(self):
-        if self._active_trap is not None:
-            self._active_trap.step_and_restore(self)
-            self._active_trap = None
-
-    def _do_trap_event(self):
-        address = self.registers.rip - 1
+    def _trigger_trap_event(self, single_stepped=False):
+        if single_stepped:
+            address = self.registers.rip
+        else:
+            address = self.registers.rip - 1
         if address in self._address_to_trap:
             trap = self._address_to_trap[address]
-            triggered = trap.get_all_not_secret_breakpoints()
+            trap.remove(self)
+            self.registers.rip = address
+            self.save_registers()
+            triggered = trap.get_all_not_internal_breakpoints()
             trap.trigger(self)
             if not trap.is_active():
                 del self._address_to_trap[address]
             else:
                 self._active_trap = trap
-            if trap.is_user_inserted() and len(triggered) == 0:
-                # XXX is_user_inserted should be is_debugger_inserted
-                #
-                # If all the breakpoints on an inserted trap are secret
+            if trap.is_debugger_inserted() and len(triggered) == 0:
+                # If all the breakpoints on an inserted trap are internal
                 # then don't report the event
                 return None
         else:
             triggered = frozenset()
         return Event(EVENT_NAME_TRAP, address=address, triggered=triggered)
 
-    def _do_status_to_event_or_none(self, status):
+    def _trigger_status_events(self, status, single_stepped=False):
         """Take a waitpid status and returns an Event. None if we don't want to surface the event to the user.
         """
         event = None
         if os.WIFSTOPPED(status):
             sig = os.WSTOPSIG(status)
             if sig == signal.SIGTRAP:
-                event = self._do_trap_event()
+                event = self._trigger_trap_event(single_stepped)
             else:
                 self._cont_signal = sig
                 event = Event(EVENT_NAME_STOPPED, signal=sig)
@@ -442,43 +440,77 @@ class Debugger:
             self._dead = True
             sig = os.WTERMSIG(status)
             event = Event(EVENT_NAME_TERMINATED, signal=sig)
-        return event
+        if event is not None:
+            self._events.append(event)
+
+    def _check_dead(self):
+        if self._dead:
+            raise DeadProcess()
+    
+    def _step_over_active_trap(self, timeout=None):
+        trap = self._active_trap
+        if trap is not None:
+            if trap.address == self.registers.rip:
+                if trap.is_debugger_inserted():
+                    self._single_step()
+                    status = self._wait(timeout=timeout)
+                    # do events but ignore the trap caused by single step
+                    if not (os.WIFSTOPPED(status) and (os.WSTOPSIG(status) == signal.SIGTRAP)):
+                        self._trigger_status_events(status)
+                else:
+                    #just skip over the breakpoint
+                    self.registers.rip += 1
+                    self.save_registers()
+            trap.restore(self)
+            self._active_trap = None
 
     def next_event(self, timeout=None):
-        if self._dead:
-            raise PointBreakException("Called next_event after %r or %r Event" % (EVENT_NAME_EXITED, EVENT_NAME_TERMINATED))
+        if self._events:
+            return self._events.popleft()
+        self._check_dead()
         while True:
-            self._restore_current_trap_if_needed()
+            self._step_over_active_trap()
             self._cont()
             status = self._wait(timeout=timeout)
-            event = self._do_status_to_event_or_none(status)
-            if event is not None:
-                return event
+            self._trigger_status_events(status)
+            if self._events:
+                return self._events.popleft()
     
     def single_step(self, timeout=None):
-        if self._dead:
-            raise PointBreakException("Called single_step after %r or %r Event" % (EVENT_NAME_EXITED, EVENT_NAME_TERMINATED))
+        self._check_dead()
+        # get active trap now as _trigger_status_events might set it
+        trap = self._active_trap
+        self._active_trap = None
         self._single_step()
         status = self._wait(timeout=timeout)
-        return self._do_status_to_event_or_none(status)
+        self._trigger_status_events(status, True)
+        if trap is not None:
+            trap.restore(self)
+        result = list(self._events)
+        self._events.clear()
+        return result
 
-    def continue_to_last_event(self, timeout=None):
+    def continue_to_last_event(self, event_timeout=None):
         while True:
-            event = self.next_event(timeout=timeout)
-            if event.is_last_event():
+            event = self.next_event(timeout=event_timeout)
+            if not self._events and self._dead:
                 return event
+
+    def raise_event(self, name, **attrs):
+        self._check_dead()
+        self._events.append(Event(name, **attrs))
 
     def _install_trap(self, symbol, breakpoint):
         address = breakpoint.address_from_symbol(symbol)
         if address in self._address_to_trap:
             self._address_to_trap[address].add_breakpoint(breakpoint)
         else:
-            original_bytes = self.read(address, 1)
-            if original_bytes != b'\xcc':
+            original_byte = self.read(address, 1)
+            if original_byte != b'\xcc':
                 self.write(address, b'\xcc')
             else:
-                original_bytes = None
-            trap = Trap(address, original_bytes)
+                original_byte = None
+            trap = Trap(address, original_byte)
             trap.add_breakpoint(breakpoint)
             self._address_to_trap[address] = trap
 
@@ -510,10 +542,10 @@ class Debugger:
                 del self._address_to_trap[trap.address]
         breakpoint.traps = []
 
-    def add_breakpoint(self, value, callback=None, immediately=False, secret=False):
+    def add_breakpoint(self, value, callback=None, immediately=False, internal=False):
         if callback is None:
             callback = lambda db: False
-        breakpoint = Breakpoint(value, callback, secret)
+        breakpoint = Breakpoint(value, callback, internal)
         if not immediately:
             self._breakpoints.append(breakpoint)
         self._new_breakpoint(breakpoint)
@@ -536,7 +568,7 @@ class Debugger:
         ptrace.set_regs(self._pid, self._registers)
 
     @property
-    def statm(self):
+    def memory_stats(self):
         return self._statm
 
     @property
@@ -546,13 +578,12 @@ class Debugger:
     @property
     def stack(self):
         return Stack(self, self.registers.rsp)
-
-
+    
     def _wait(self, timeout=None):
         self._registers = None
-        if timeout is None and self._timeout is not None:
+        if timeout is None:
             timeout = self._timeout
-        if timeout:
+        if timeout is not None:
             st = time.time()
             while time.time() - st < timeout:
                 status = os.waitpid(self._pid, os.WNOHANG)
@@ -562,11 +593,22 @@ class Debugger:
             raise Timeout()
         return os.waitpid(self._pid, 0)[1]
 
-    def _maps(self):
-        for mapping in _maps(self._pid):
-            yield mapping
+    def read_without_inserted_breakpoints(self, offset, byte_len):
+        """Read memory at offset for byte_len bytes but without inserted breakpoints
+
+        Any inserted breakpoints (0xcc) are replaced with there original byte.
+        """
+        ba = bytearray(self.read(offset, byte_len))
+        lower = offset
+        upper = offset + len(ba)
+        for addr, trap in self._address_to_trap:
+            if trap.original_byte is not None:
+                if lower <= addr < upper and trap.original_byte is not None:
+                    ba[addr - lower] = trap.original_byte
+        return bytes(ba)
 
     def read(self, offset, byte_len):
+        self._check_dead()
         self._seek(offset)
         try:
             b = os.read(self._mem_fd, byte_len)
@@ -577,6 +619,7 @@ class Debugger:
         return b
 
     def write(self, offset, bytes_towrite):
+        self._check_dead()
         self._seek(offset)
         try:
             num_written = os.write(self._mem_fd, bytes_towrite)
@@ -592,7 +635,7 @@ class Debugger:
             return lseek64(self._mem_fd, offset, os.SEEK_SET)
 
     def read_string(self, offset):
-        return self.reference(offset, types.c_string).value.decode('utf8')
+        return self.reference(offset, types.c_string).value.decode('utf8', 'replace')
 
     def read_fmt(self, offset, fmt):
         size = struct.calcsize(fmt)
@@ -606,11 +649,8 @@ class Debugger:
         return types.reference(mtype, offset, self)
 
     def signal(self, signal):
+        self._check_dead()
         os.kill(self._pid, signal)
-
-    def wait(self):
-        status = self._wait()
-        return self._do_status_to_event_or_none(status)
 
     def sigkill(self):
         return self.signal(signal.SIGKILL)
@@ -621,16 +661,14 @@ class Debugger:
     def sigcont(self):
         return self.signal(signal.SIGCONT)
 
-    def kill(self):
-        self.sigkill()
-        self.wait()
-
     def backtrace(self):
+        self._check_dead()
         result = []
         cur = self.frame
         while cur is not None:
-            result.insert(0, cur)
+            result.append(cur)
             cur = cur.parent
+        result.reverse()
         return result
 
     def address_to_description(self, address):
@@ -638,21 +676,25 @@ class Debugger:
 
     def __del__(self):
         if not self._dead:
-            self.kill()
+            self.sigkill()
+            self._wait()
+
+    class Iterator:
+        def __init__(self, db):
+            self.db = db
+
+        def __next__(self):
+            if self.db._dead:
+                raise StopIteration()
+            return self.db.next_event()
+        
+        next = __next__
 
     def __iter__(self):
-        return self
-
-    def __next__(self):
-        if self._dead:
-            raise StopIteration()
-        return self.next_event()
-    
-    next = __next__
+        return Debugger.Iterator(self)
 
 
-
-def create_debugger(command, environment=None, timeout=None, disable_randomisation=True):
+def create_debugger(command, environment=None, timeout=None, disable_randomisation=True, kill_on_exit=True, trap_exit=True):
     split_command = shlex.split(command)
     executable_path, args = split_command[0], split_command[1:]
     if os.path.exists(executable_path): 
@@ -686,7 +728,10 @@ def create_debugger(command, environment=None, timeout=None, disable_randomisati
         os.execve(exec_abs_path, [exec_abs_path] + args, env) # Run the debug target
     else:
         os.waitpid(child_pid, 0)
-        ptrace.set_exit_kill(child_pid)
+        if trap_exit:
+            ptrace.set_trace_exit(child_pid)
+        if kill_on_exit:
+            ptrace.set_exit_kill(child_pid)
         return Debugger(child_pid, timeout=timeout)
 
 
