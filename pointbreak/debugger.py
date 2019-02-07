@@ -24,7 +24,7 @@ from . import auxv
 from .exceptions import Timeout, ExecutableNotFound, PointBreakException, DeadProcess
 
 # XXX work around for long file support
-# Man pages seem to be vague/wrong about off64_t being signed
+# Man pages seem to be wrong about off64_t being signed
 # https://bugs.python.org/issue12545
 lseek64 = ctypes.CDLL('libc.so.6').lseek64
 lseek64.restype = ctypes.c_uint64
@@ -593,7 +593,7 @@ class Debugger:
             raise Timeout()
         return os.waitpid(self._pid, 0)[1]
 
-    def read_without_inserted_breakpoints(self, offset, byte_len):
+    def read_unmodified(self, offset, byte_len):
         """Read memory at offset for byte_len bytes but without inserted breakpoints
 
         Any inserted breakpoints (0xcc) are replaced with there original byte.
@@ -601,7 +601,7 @@ class Debugger:
         ba = bytearray(self.read(offset, byte_len))
         lower = offset
         upper = offset + len(ba)
-        for addr, trap in self._address_to_trap:
+        for addr, trap in self._address_to_trap.items():
             if trap.original_byte is not None:
                 if lower <= addr < upper and trap.original_byte is not None:
                     ba[addr - lower] = trap.original_byte
@@ -725,9 +725,15 @@ def create_debugger(command, environment=None, timeout=None, disable_randomisati
             process.disable_address_space_randomisation()
         ptrace.trace_me() # Enable tracing
         os.path.basename(exec_path)
-        os.execve(exec_abs_path, [exec_abs_path] + args, env) # Run the debug target
+        try:
+            os.execve(exec_abs_path, [exec_abs_path] + args, env) # Run the debug target
+        except Exception as e:
+            print("Error on execve. Exiting immediatley:", e)
+            os._exit(1)
     else:
-        os.waitpid(child_pid, 0)
+        status = os.waitpid(child_pid, 0)[1]
+        if os.WIFSIGNALED(status) or os.WIFEXITED(status):
+            raise DeadProcess('Child exited before debugger was setup')
         if trap_exit:
             ptrace.set_trace_exit(child_pid)
         if kill_on_exit:
