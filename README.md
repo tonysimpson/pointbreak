@@ -16,7 +16,7 @@ Pointbreak is designed to make debugging and analysing complex things like JITs 
 * Simpler and less restrictive than GDB Python API
 
 ## Disadvantage
-* Early developement
+* Early development
 * Missing many standard debugger features
 * Other issues see https://github.com/tonysimpson/pointbreak/issues
 
